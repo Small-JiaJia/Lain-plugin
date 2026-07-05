@@ -14,7 +14,8 @@ class QQBotIdMap {
     version: 1,
     users: {},
     groups: {},
-    enabled_groups: {}
+    enabled_groups: {},
+    bots: {}
   }
 
   static loaded = false
@@ -50,7 +51,8 @@ class QQBotIdMap {
           version: 1,
           users: data.users || {},
           groups: data.groups || {},
-          enabled_groups: data.enabled_groups || {}
+          enabled_groups: data.enabled_groups || {},
+          bots: data.bots || {}
         }
       }
     } catch (error) {
@@ -96,6 +98,7 @@ class QQBotIdMap {
     if (!this.data.users[self_id]) this.data.users[self_id] = {}
     if (!this.data.groups[self_id]) this.data.groups[self_id] = {}
     if (!this.data.enabled_groups[self_id]) this.data.enabled_groups[self_id] = {}
+    if (!this.data.bots) this.data.bots = {}
 
     if (groupOpenid) {
       const old = this.data.groups[self_id][groupOpenid] || {}
@@ -148,6 +151,39 @@ class QQBotIdMap {
     }
   }
 
+  static bindBotQQ ({ self_id, qq_self_id }) {
+    this.load()
+    self_id = String(self_id || '')
+    const qqSelfId = this.normalizeQQ(qq_self_id)
+    if (!self_id || !qqSelfId) return null
+
+    if (!this.data.bots) this.data.bots = {}
+    const old = this.data.bots[self_id] || {}
+    const now = Date.now()
+    this.data.bots[self_id] = {
+      self_id,
+      qq_self_id: qqSelfId,
+      created_at: old.created_at || now,
+      updated_at: now
+    }
+
+    return {
+      ...this.data.bots[self_id],
+      saved: this.save()
+    }
+  }
+
+  static getBoundBotQQ (self_id) {
+    this.load()
+    self_id = String(self_id || '')
+    return this.normalizeQQ(this.data.bots?.[self_id]?.qq_self_id)
+  }
+
+  static getEffectiveQQSelfId (qqbotSelfId, mapping = {}, source = null) {
+    return this.getBoundBotQQ(qqbotSelfId) ||
+      this.normalizeQQ(mapping.qq_self_id || source?.self_id || source?.uin || source?.bot?.uin)
+  }
+
   static getStoredMapping (e) {
     this.load()
     const self_id = String(e.self_id || '')
@@ -158,12 +194,13 @@ class QQBotIdMap {
     const user = this.data.users[self_id]?.[userOpenid]
     const group = this.data.groups[self_id]?.[groupOpenid]
     const userGroup = user?.groups?.[groupOpenid] || {}
+    const botQQ = this.getBoundBotQQ(self_id)
     const mapping = {
       qq: user?.qq || null,
       group_qq: group?.group_qq || userGroup.group_qq || null,
       nickname: user?.nickname || '',
       group_name: group?.group_name || '',
-      qq_self_id: group?.qq_self_id || userGroup.qq_self_id || user?.qq_self_id || null,
+      qq_self_id: botQQ || group?.qq_self_id || userGroup.qq_self_id || user?.qq_self_id || null,
       qq_adapter: group?.qq_adapter || userGroup.qq_adapter || user?.qq_adapter || ''
     }
     const mentionMappings = this.getStoredAtMappings(e, self_id, groupOpenid)
@@ -343,9 +380,9 @@ class QQBotIdMap {
 
   static applyICQQEventShape (e, mapping = {}, context = {}) {
     const source = mapping.source_event || null
-    const qqSelfId = this.normalizeQQ(mapping.qq_self_id || source?.self_id || source?.uin || source?.bot?.uin)
     const qqAdapter = String(mapping.qq_adapter || source?.adapter || source?.bot?.adapter || '').trim()
     const originalSelfId = String(e.qqbot_self_id || e.qqbot_appid || e.self_id || e.bot?.config?.appid || '')
+    const qqSelfId = this.getEffectiveQQSelfId(originalSelfId, mapping, source)
 
     e.qqbot_self_id = originalSelfId
     e.qqbot_appid = originalSelfId
@@ -365,6 +402,7 @@ class QQBotIdMap {
     if (qqSelfId) {
       e.self_id = qqSelfId
       e.uin = qqSelfId
+      e.self = qqSelfId
       e.bot = Bot?.[qqSelfId] || source?.bot || e.bot
     }
 

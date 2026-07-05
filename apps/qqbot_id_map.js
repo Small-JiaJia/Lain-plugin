@@ -9,6 +9,10 @@ export class qqbotIdMap extends plugin {
       priority: -100,
       rule: [
         {
+          reg: /^#?@?绑定机器人qq\s*\d+$/i,
+          fnc: 'bindBotQQ'
+        },
+        {
           reg: /^#?绑定qq\d+$/i,
           fnc: 'bindQQ'
         },
@@ -22,6 +26,23 @@ export class qqbotIdMap extends plugin {
         }
       ]
     })
+  }
+
+  async bindBotQQ (e) {
+    if (!this.isQQBot(e)) return false
+
+    const match = String(e.msg || e.raw_message || '').trim().match(/^#?@?绑定机器人qq\s*(\d+)$/i)
+    const qq = match?.[1]
+    const selfId = this.getQQBotSelfId(e)
+    if (!qq || !selfId) return await this.reply('绑定失败，缺少机器人QQ或QQBot ID')
+
+    const mapping = QQBotIdMap.bindBotQQ({
+      self_id: selfId,
+      qq_self_id: qq
+    })
+    if (!mapping?.saved) return await this.reply('绑定失败，映射配置保存失败')
+
+    return await this.reply(`机器人QQ（${mapping.qq_self_id}）绑定QQBot（${mapping.self_id}）`)
   }
 
   async bindQQ (e) {
