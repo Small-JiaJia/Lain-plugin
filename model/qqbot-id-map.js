@@ -15,7 +15,8 @@ class QQBotIdMap {
     users: {},
     groups: {},
     enabled_groups: {},
-    bots: {}
+    bots: {},
+    features: {}
   }
 
   static loaded = false
@@ -52,7 +53,8 @@ class QQBotIdMap {
           users: data.users || {},
           groups: data.groups || {},
           enabled_groups: data.enabled_groups || {},
-          bots: data.bots || {}
+          bots: data.bots || {},
+          features: data.features || {}
         }
       }
     } catch (error) {
@@ -99,6 +101,7 @@ class QQBotIdMap {
     if (!this.data.groups[self_id]) this.data.groups[self_id] = {}
     if (!this.data.enabled_groups[self_id]) this.data.enabled_groups[self_id] = {}
     if (!this.data.bots) this.data.bots = {}
+    if (!this.data.features) this.data.features = {}
 
     if (groupOpenid) {
       const old = this.data.groups[self_id][groupOpenid] || {}
@@ -374,7 +377,7 @@ class QQBotIdMap {
     this.fillICQQIdentityFields(e, { qq, groupQQ, nickname: mapping.nickname })
     this.applyAtMappings(e, mentions)
     this.finalizeICQQMessageFields(e)
-    this.attachICQQRuntimeApis(e, { qq, groupQQ })
+    this.attachICQQRuntimeApis(e, { qq, groupQQ, openidGroupId })
     this.cacheBotRoute(e, qq, groupQQ, openidUserId, openidGroupId)
   }
 
@@ -429,6 +432,7 @@ class QQBotIdMap {
     if (selfId) {
       e.self_id = selfId
       e.uin = selfId
+      e.self = selfId
     }
 
     if (!e.sender) e.sender = {}
@@ -514,10 +518,12 @@ class QQBotIdMap {
     }
   }
 
-  static attachICQQRuntimeApis (e, { qq, groupQQ } = {}) {
+  static attachICQQRuntimeApis (e, { qq, groupQQ, openidGroupId = '' } = {}) {
     const selfId = this.normalizeQQ(e.self_id || e.uin)
     const bot = selfId ? Bot?.[selfId] : null
     const isGroup = e.message_type === 'group' && !!groupQQ
+    const qqbotSelfId = String(e.qqbot_self_id || e.qqbot_appid || '')
+    const groupOpenid = openidGroupId || e.openid_group_id || e.qqbot_group_id || ''
 
     e.isGroup = isGroup
     e.isPrivate = e.message_type === 'private'
@@ -533,7 +539,15 @@ class QQBotIdMap {
       e.group = this.mergeApiObject(e.group, pickedGroup)
       e.group_id = groupQQ
       e.group_name = e.group_name || e.group?.name || String(groupQQ)
-      if (typeof e.group?.getMemberMap !== 'function') {
+      if (this.isMemberListConvertEnabled(qqbotSelfId, groupOpenid)) {
+        this.attachCachedMemberApis(e.group, {
+          self_id: qqbotSelfId,
+          group_openid: groupOpenid,
+          group_qq: groupQQ,
+          qq_self_id: selfId,
+          fallbackBot: bot
+        })
+      } else if (typeof e.group?.getMemberMap !== 'function') {
         e.group.getMemberMap = async () => new Map()
       }
       if (typeof e.group?.getChatHistory !== 'function') {
@@ -551,6 +565,34 @@ class QQBotIdMap {
     }
 
     if (!e.source) e.source = this.getReplySource(e)
+  }
+
+  static attachCachedMemberApis (group, { self_id, group_openid, group_qq, qq_self_id, fallbackBot } = {}) {
+    if (!group) return group
+
+    const getMemberMap = async () => this.getCachedGroupMemberMap({
+      self_id,
+      group_openid,
+      group_qq,
+      qq_self_id
+    })
+    const getMemberList = async () => Array.from((await getMemberMap()).values())
+    const pickMember = userId => this.pickCachedGroupMember({
+      self_id,
+      group_openid,
+      group_qq,
+      user_id: userId,
+      qq_self_id
+    }) || fallbackBot?.pickMember?.(group_qq, userId) || {}
+
+    group.getMemberMap = getMemberMap
+    group.getMemberList = getMemberList
+    group.getMemberInfo = async userId => {
+      const member = pickMember(userId)
+      return member?.info || member || {}
+    }
+    group.pickMember = pickMember
+    return group
   }
 
   static mergeApiObject (base, api) {
@@ -795,11 +837,156 @@ class QQBotIdMap {
     }
   }
 
+  static setGroupFeature ({ self_id, group_openid, feature, enabled, group_qq = '', group_name = '' }) {
+    this.load()
+    self_id = String(self_id || '')
+    feature = String(feature || '').trim()
+    const groupOpenid = this.normalizeOpenid(group_openid, self_id)
+    if (!self_id || !groupOpenid || !feature) return null
+
+    if (!this.data.features) this.data.features = {}
+    if (!this.data.features[self_id]) this.data.features[self_id] = {}
+    const old = this.data.features[self_id][groupOpenid] || {}
+    const features = {
+      ...(old.features || {}),
+      [feature]: !!enabled
+    }
+    const now = Date.now()
+
+    this.data.features[self_id][groupOpenid] = {
+      group_openid: groupOpenid,
+      group_qq: this.normalizeQQ(group_qq) || old.group_qq || null,
+      group_name: group_name || old.group_name || '',
+      features,
+      updated_at: now
+    }
+
+    this.bind({
+      self_id,
+      group_openid: groupOpenid,
+      group_qq,
+      group_name
+    })
+
+    const saved = this.save()
+    return {
+      ...this.data.features[self_id][groupOpenid],
+      feature,
+      enabled: features[feature],
+      saved
+    }
+  }
+
   static isGroupEnabled (self_id, group_openid) {
     this.load()
     self_id = String(self_id || '')
     const groupOpenid = this.normalizeOpenid(group_openid, self_id)
     return !!this.data.enabled_groups[self_id]?.[groupOpenid]?.enabled
+  }
+
+  static isGroupFeatureEnabled (self_id, group_openid, feature, defaultEnabled = false) {
+    this.load()
+    self_id = String(self_id || '')
+    feature = String(feature || '').trim()
+    const groupOpenid = this.normalizeOpenid(group_openid, self_id)
+    if (!self_id || !groupOpenid || !feature) return false
+
+    const value = this.data.features?.[self_id]?.[groupOpenid]?.features?.[feature]
+    return value == null ? !!defaultEnabled : !!value
+  }
+
+  static isMemberListConvertEnabled (self_id, group_openid) {
+    if (!self_id || !group_openid) return false
+    return this.isGroupFeatureEnabled(self_id, group_openid, 'member_list', this.isGroupEnabled(self_id, group_openid))
+  }
+
+  static getCachedGroupMemberMap ({ self_id, group_openid, group_qq = '', qq_self_id = '' } = {}) {
+    this.load()
+    self_id = String(self_id || '')
+    if (!self_id) return new Map()
+
+    const groupOpenid = this.resolveGroupOpenid(self_id, group_openid, group_qq)
+    if (!groupOpenid) return new Map()
+
+    const group = this.data.groups[self_id]?.[groupOpenid] || {}
+    const groupQQ = this.normalizeQQ(group_qq) || this.normalizeQQ(group.group_qq)
+    const qqSelfId = this.normalizeQQ(qq_self_id) || this.getBoundBotQQ(self_id) || this.normalizeQQ(group.qq_self_id)
+    const ret = new Map()
+
+    for (const user of Object.values(this.data.users[self_id] || {})) {
+      const qq = this.normalizeQQ(user?.qq)
+      const userGroup = user?.groups?.[groupOpenid]
+      if (!qq || !userGroup) continue
+
+      ret.set(qq, this.createCachedMember(user, userGroup, {
+        groupQQ,
+        groupOpenid,
+        qqSelfId
+      }))
+    }
+
+    return ret
+  }
+
+  static pickCachedGroupMember ({ self_id, group_openid, group_qq = '', user_id, qq_self_id = '' } = {}) {
+    const qq = this.normalizeQQ(user_id)
+    if (!qq) return null
+    return this.getCachedGroupMemberMap({
+      self_id,
+      group_openid,
+      group_qq,
+      qq_self_id
+    }).get(qq) || null
+  }
+
+  static createCachedMember (user, userGroup = {}, { groupQQ, groupOpenid, qqSelfId } = {}) {
+    const userId = this.normalizeQQ(user.qq)
+    const nickname = user.nickname || ''
+    const groupId = groupQQ || userGroup.group_qq || null
+    const role = userGroup.role || 'member'
+    const member = {
+      group_id: groupId,
+      user_id: userId,
+      nickname,
+      card: userGroup.card || '',
+      card_or_nickname: userGroup.card || nickname,
+      sex: 'unknown',
+      age: 0,
+      area: '',
+      level: '1',
+      qq_level: 0,
+      join_time: 0,
+      last_sent_time: Math.floor((user.updated_at || userGroup.updated_at || Date.now()) / 1000),
+      title_expire_time: 0,
+      unfriendly: false,
+      card_changeable: true,
+      is_robot: false,
+      shut_up_timestamp: 0,
+      role,
+      title: '',
+      uin: qqSelfId || null,
+      qqbot_user_id: user.user_openid,
+      qqbot_group_id: groupOpenid
+    }
+
+    member.is_admin = role === 'admin' || role === 'owner'
+    member.is_owner = role === 'owner'
+    member.info = { ...member }
+    member.getAvatarUrl = (size = 0) => `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${userId}`
+    member.getInfo = async () => member.info
+    member.sendMsg = async msg => Bot?.[qqSelfId]?.pickFriend?.(userId)?.sendMsg?.(msg)
+    return member
+  }
+
+  static resolveGroupOpenid (self_id, group_openid = '', group_qq = '') {
+    const openid = String(group_openid || '').trim()
+    if (openid && !this.isNumericQQ(openid)) return this.normalizeOpenid(openid, self_id)
+
+    const groupQQ = this.normalizeQQ(group_qq) || this.normalizeQQ(openid)
+    if (!groupQQ) return openid ? this.normalizeOpenid(openid, self_id) : ''
+
+    const group = this.findGroupByQQ(self_id, groupQQ)
+    return group?.group_openid || ''
   }
 
   static hasEnabledGroup () {

@@ -73,6 +73,11 @@ AppSecret(机器人密钥)：`abcdefghijklmnopqrstuvwxyz`
 ```
 #QQBot设置前缀关闭
 ```
+也可以使用更明确的别名：
+```
+#QQBot设置斜杠转#关闭
+#QQBot设置/转#关闭
+```
 或者编辑 [config/token.yaml](../config/token.yaml) 配置文件，关闭将 `/` 转换为 `#`
 
 

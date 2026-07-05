@@ -21,6 +21,14 @@ export class qqbotIdMap extends plugin {
           fnc: 'bindGroupQQ'
         },
         {
+          reg: /^#?(开启|关闭)群员转换$/i,
+          fnc: 'toggleMemberConvert'
+        },
+        {
+          reg: /^#?(开启|关闭)全部转换$/i,
+          fnc: 'toggleAllConvert'
+        },
+        {
           reg: /^#?(开启|关闭)转换$/i,
           fnc: 'toggleConvert'
         }
@@ -105,6 +113,52 @@ export class qqbotIdMap extends plugin {
     if (!state?.saved) return await this.reply('操作失败，转换配置保存失败')
 
     return await this.reply(`${enabled ? '已开启' : '已关闭'}本群QQBot转换`)
+  }
+
+  async toggleMemberConvert (e) {
+    if (!this.isQQBot(e)) return false
+    if (e.message_type !== 'group') return await this.reply('请在QQ群聊使用')
+
+    const enabled = /^#?开启群员转换$/i.test(String(e.msg || e.raw_message || '').trim())
+    const state = this.setGroupFeature(e, 'member_list', enabled)
+    if (!state?.saved) return await this.reply('操作失败，群员转换配置保存失败')
+
+    return await this.reply(`${enabled ? '已开启' : '已关闭'}本群缓存群员转换`)
+  }
+
+  async toggleAllConvert (e) {
+    if (!this.isQQBot(e)) return false
+    if (e.message_type !== 'group') return await this.reply('请在QQ群聊使用')
+
+    const enabled = /^#?开启全部转换$/i.test(String(e.msg || e.raw_message || '').trim())
+    const groupOpenid = this.getGroupOpenid(e)
+    if (!groupOpenid) return await this.reply('操作失败，缺少群Openid')
+
+    const base = QQBotIdMap.setGroupEnabled({
+      self_id: this.getQQBotSelfId(e),
+      group_openid: groupOpenid,
+      enabled,
+      group_qq: this.getGroupQQ(e) || '',
+      group_name: e.group_name || ''
+    })
+    const member = this.setGroupFeature(e, 'member_list', enabled)
+    if (!base?.saved || !member?.saved) return await this.reply('操作失败，转换配置保存失败')
+
+    return await this.reply(`${enabled ? '已开启' : '已关闭'}本群QQBot全部转换`)
+  }
+
+  setGroupFeature (e, feature, enabled) {
+    const groupOpenid = this.getGroupOpenid(e)
+    if (!groupOpenid) return null
+
+    return QQBotIdMap.setGroupFeature({
+      self_id: this.getQQBotSelfId(e),
+      group_openid: groupOpenid,
+      feature,
+      enabled,
+      group_qq: this.getGroupQQ(e) || '',
+      group_name: e.group_name || ''
+    })
   }
 
   isQQBot (e) {

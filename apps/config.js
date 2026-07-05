@@ -11,7 +11,7 @@ export class adapter extends plugin {
       priority: 1,
       rule: [
         {
-          reg: /^#QQ(群|Bot|频道)设置(QQ图床|前缀|防倒卖(群号)?).+/i,
+          reg: /^#QQ(群|Bot|频道)设置(QQ图床|前缀|斜杠转#|斜杠转换|\/转#|\/转换为?#?|防倒卖(群号)?).+/i,
           fnc: 'other',
           permission: 'master'
         },
@@ -163,7 +163,7 @@ export class adapter extends plugin {
 
   /** 其他 */
   async other () {
-    const msg = this.e.msg.replace(/^#QQ(群|Bot|频道)设置(QQ图床|前缀|防倒卖(群号)?)/i, '').replace(/：/g, ':').trim().split(':')
+    const msg = this.e.msg.replace(/^#QQ(群|Bot|频道)设置(QQ图床|前缀|斜杠转#|斜杠转换|\/转#|\/转换为?#?|防倒卖(群号)?)/i, '').replace(/：/g, ':').trim().split(':')
     const cfg = new YAML(lain._pathCfg + '/token.yaml')
     if (msg.length != 1 && msg.length != 2) return await this.reply('格式错误!', true, { at: true })
 
@@ -171,16 +171,20 @@ export class adapter extends plugin {
     if (msg.length == 2) {
       self_id = msg[0]
     } else {
-      if (this.e?.adapter === 'QQBot') self_id = this.e.self_id
-      else 
-        return await this.reply('格式错误!', true, { at: true })
+      self_id = this.getQQBotConfigSelfId(this.e)
+      if (!self_id) return await this.reply('格式错误!', true, { at: true })
     }
     if (cfg.value('token', self_id)) {
       let val = cfg.get('token')
       if (this.e.msg.includes('图床')) {
         val[self_id].other.QQ = Number(msg[1] || msg[0])
-      } else if (this.e.msg.includes('前缀')) {
-        val[self_id].other.Prefix = (msg[1] || msg[0]) === '开启'
+      } else if (this.isPrefixConvertSetting(this.e.msg)) {
+        const enabled = (msg[1] || msg[0]) === '开启'
+        val[self_id].other.Prefix = enabled
+        if (Bot?.[self_id]?.config) {
+          if (!Bot[self_id].config.other) Bot[self_id].config.other = {}
+          Bot[self_id].config.other.Prefix = enabled
+        }
       } else if (this.e.msg.includes('防倒卖群号')) {
         val[self_id].other.Tips = Number(msg[1] || msg[0]) || String(msg[1] || msg[0])
       } else if (this.e.msg.includes('防倒卖')) {
@@ -193,5 +197,14 @@ export class adapter extends plugin {
     } else {
       return await this.reply('不存在此appid对应的bot!', true, { at: true })
     }
+  }
+
+  isPrefixConvertSetting (msg) {
+    return /前缀|斜杠|\/转|\/转换/i.test(String(msg || ''))
+  }
+
+  getQQBotConfigSelfId (e) {
+    if (!e) return ''
+    return String(e.qqbot_self_id || e.qqbot_appid || e.bot?.config?.appid || (e.adapter === 'QQBot' ? e.self_id : '') || '')
   }
 }

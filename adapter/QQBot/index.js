@@ -493,8 +493,8 @@ export default class adapterQQBot {
   /** 前缀处理 */
   hasAlias(text, e, hasAlias = true) {
     text = text.trim()
-    if (Bot[this.id].config.other.Prefix && text.startsWith('/')) {
-      return text.replace(/^\s*\/\s*/, "#")
+    if (this.isSlashToHashEnabled() && this.isSlashCommand(text)) {
+      return this.slashToHash(text)
     }
     /** 兼容前缀 */
     let groupCfg = MiaoCfg.getGroup(e.group_id)
@@ -506,12 +506,24 @@ export default class adapterQQBot {
       if (text.startsWith(name)) {
         /** 先去掉前缀 再 / => # */
         text = lodash.trimStart(text, name)
-        if (Bot[this.id].config.other.Prefix) text = text.replace(/^\s*\/\s*/, "#")
+        if (this.isSlashToHashEnabled()) text = this.slashToHash(text)
         if (hasAlias) return name + text
         return text
       }
     }
     return text
+  }
+
+  isSlashToHashEnabled() {
+    return !!Bot[this.id]?.config?.other?.Prefix
+  }
+
+  isSlashCommand(text) {
+    return /^[\/／]/.test(String(text || '').trim())
+  }
+
+  slashToHash(text) {
+    return String(text || '').replace(/^\s*[\/／]\s*/, '#')
   }
 
   /** 日志 */
