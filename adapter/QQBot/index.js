@@ -406,12 +406,13 @@ export default class adapterQQBot {
       e.atme = isGroupAtEvent || selfIds.has(cleanId(leadingMention[1]))
     }
     if (e.atme) msg = msg.replace(/^<@!?.+?>\s*/, '').trim()
-    if (msg) e.raw_message = msg
+    if (msg) e.raw_message = this.normalizeMsgText(msg)
     delete e.msg
   }
 
   defineIncomingMsg(e) {
     const base = this.normalizeMsgText(e.raw_message)
+    e.raw_message = base
     let msg = base
 
     Object.defineProperty(e, 'msg', {
@@ -425,7 +426,7 @@ export default class adapterQQBot {
   }
 
   normalizeMsgText(value, base = '') {
-    let text = String(value || '').replace(/<@!?[^>]+>\s*/g, '').trim()
+    let text = this.normalizeCommandText(String(value || '').replace(/<@!?[^>]+>\s*/g, '').trim())
     const normalizedBase = String(base || '').trim()
     if (normalizedBase) {
       const repeated = new RegExp(`^(?:${this.escapeRegExp(normalizedBase)}\\s*)+$`)
@@ -436,6 +437,28 @@ export default class adapterQQBot {
         if (repeated.test(body)) return atPrefix[0] + normalizedBase
       }
     }
+    text = this.collapseRepeatedCommandText(text)
+    return text
+  }
+
+  normalizeCommandText(text) {
+    return String(text || '').replace(/(^|\s)＃(?=\S)/g, '$1#')
+  }
+
+  collapseRepeatedCommandText(text) {
+    text = String(text || '').trim()
+    if (!text.startsWith('#')) return text
+
+    for (const match of text.slice(1).matchAll(/#/g)) {
+      const index = match.index + 1
+      const command = text.slice(0, index).trim()
+      const rest = text.slice(index).trim()
+      if (!command || !rest) continue
+
+      const repeated = new RegExp(`^(?:${this.escapeRegExp(command)}\\s*)+$`)
+      if (repeated.test(rest)) return command
+    }
+
     return text
   }
 
