@@ -406,8 +406,14 @@ class QQBotIdMap {
       e.self_id = qqSelfId
       e.uin = qqSelfId
       e.self = qqSelfId
-      e.bot = Bot?.[qqSelfId] || source?.bot || e.bot
+      e.bot = this.ensureQQSelfBotAlias({
+        qq_self_id: qqSelfId,
+        qqbot_self_id: originalSelfId,
+        bot: Bot?.[qqSelfId] || source?.bot || e.bot,
+        qqbot_bot: e.qqbot_bot
+      }) || Bot?.[qqSelfId] || source?.bot || e.bot
     }
+    e.bot = this.withQQBotAdapterMarker(e.bot, e.qqbot_bot, qqSelfId || originalSelfId)
 
     if (qqAdapter || qqSelfId) e.adapter = qqAdapter || 'OneBotV11'
 
@@ -600,6 +606,170 @@ class QQBotIdMap {
       ...(base || {}),
       ...(api || {})
     }
+  }
+
+  static withQQBotAdapterMarker (bot, qqbotBot, self_id = '') {
+    const rawSelfId = String(self_id || bot?.uin || bot?.self_id || qqbotBot?.uin || qqbotBot?.self_id || '').trim()
+    const selfId = this.normalizeQQ(self_id) ||
+      this.normalizeQQ(bot?.uin || bot?.self_id) ||
+      this.normalizeQQ(qqbotBot?.uin || qqbotBot?.self_id) ||
+      rawSelfId
+    if (!bot && !qqbotBot && !selfId) return bot
+
+    try {
+      const base = bot || qqbotBot || {}
+      const wrapper = Object.create(base)
+      if (selfId) {
+        wrapper.uin = selfId
+        wrapper.self_id = selfId
+      }
+      wrapper.adapter = {
+        id: 'QQBot',
+        name: 'QQBot',
+        raw: bot?.adapter || qqbotBot?.adapter
+      }
+      wrapper.qqbot_bot = qqbotBot || bot?.qqbot_bot || null
+      this.fillMinimalBotFields(wrapper, selfId)
+      return wrapper
+    } catch {
+      const fallback = bot || {
+        uin: selfId,
+        self_id: selfId,
+        adapter: {
+          id: 'QQBot',
+          name: 'QQBot',
+          raw: qqbotBot?.adapter
+        },
+        qqbot_bot: qqbotBot || null
+      }
+      this.fillMinimalBotFields(fallback, selfId)
+      return fallback
+    }
+  }
+
+  static fillMinimalBotFields (bot, self_id = '') {
+    if (!bot) return bot
+    if (self_id) {
+      bot.uin = bot.uin || self_id
+      bot.self_id = bot.self_id || self_id
+    }
+    bot.fl = bot.fl || new Map()
+    bot.gl = bot.gl || new Map()
+    bot.gml = bot.gml || new Map()
+    bot.tl = bot.tl || new Map()
+    bot.guilds = bot.guilds || new Map()
+    bot.stat = bot.stat || { start_time: Date.now() / 1000, recv_msg_cnt: 0 }
+    if (typeof bot.getFriendMap !== 'function') bot.getFriendMap = () => bot.fl
+    if (typeof bot.getGroupList !== 'function') bot.getGroupList = () => bot.gl
+    if (typeof bot.getGuildList !== 'function') bot.getGuildList = () => bot.tl
+    if (typeof bot.pickGroup !== 'function') bot.pickGroup = () => ({})
+    if (typeof bot.pickFriend !== 'function') bot.pickFriend = () => ({})
+    if (typeof bot.pickUser !== 'function') bot.pickUser = userId => bot.pickFriend(userId)
+    return bot
+  }
+
+  static ensureQQSelfBotAlias ({ qq_self_id, qqbot_self_id = '', bot = null, qqbot_bot = null } = {}) {
+    const qqSelfId = this.normalizeQQ(qq_self_id)
+    if (!qqSelfId) return bot
+
+    if (Bot?.[qqSelfId]) {
+      this.fillMinimalBotFields(Bot[qqSelfId], qqSelfId)
+      return Bot[qqSelfId]
+    }
+
+    const qqbotSelfId = String(qqbot_self_id || '').trim()
+    const base = bot || qqbot_bot || (qqbotSelfId ? Bot?.[qqbotSelfId] : null)
+    const alias = this.withQQBotAdapterMarker(base, qqbot_bot || (qqbotSelfId ? Bot?.[qqbotSelfId] : null), qqSelfId)
+    if (!alias || !Bot) return alias || bot
+
+    try {
+      Bot[qqSelfId] = alias
+      if (Array.isArray(Bot.adapter) && !Bot.adapter.includes(String(qqSelfId))) {
+        Bot.adapter.push(String(qqSelfId))
+      }
+    } catch (error) {
+      logger.debug('[QQBotIdMap]注册QQ Bot别名失败', error)
+    }
+
+    return alias
+  }
+
+  static patchQQSelfBotRoute ({ qq_self_id, qqbot_self_id, group_qq, group_openid } = {}) {
+    const qqSelfId = this.normalizeQQ(qq_self_id)
+    const groupQQ = this.normalizeQQ(group_qq)
+    const qqbotSelfId = String(qqbot_self_id || '')
+    const groupOpenid = String(group_openid || '').trim()
+    if (!qqSelfId || !groupQQ || !qqbotSelfId || !groupOpenid) return false
+
+    const bot = Bot?.[qqSelfId]
+    const qqbot = Bot?.[qqbotSelfId]
+    if (!bot || !qqbot || typeof qqbot.pickGroup !== 'function') return false
+
+    try {
+      if (!bot.__qqbotIdMapRoutes) {
+        Object.defineProperty(bot, '__qqbotIdMapRoutes', {
+          value: { groups: new Map() },
+          enumerable: false,
+          configurable: true
+        })
+      }
+      bot.__qqbotIdMapRoutes.groups.set(groupQQ, { qqbotSelfId, groupOpenid })
+      this.patchQQSelfBotGetMsg(bot)
+
+      if (bot.__qqbotIdMapPickGroupPatched) return true
+
+      const originalPickGroup = typeof bot.pickGroup === 'function' ? bot.pickGroup.bind(bot) : null
+      Object.defineProperty(bot, '__qqbotIdMapPickGroupPatched', {
+        value: true,
+        enumerable: false,
+        configurable: true
+      })
+      Object.defineProperty(bot, '__qqbotIdMapPickGroup', {
+        value: originalPickGroup,
+        enumerable: false,
+        configurable: true
+      })
+
+      bot.pickGroup = groupId => {
+        const route = bot.__qqbotIdMapRoutes?.groups?.get(this.normalizeQQ(groupId))
+        if (route) {
+          const targetBot = Bot?.[route.qqbotSelfId]
+          const targetGroup = targetBot?.pickGroup?.(route.groupOpenid)
+          if (targetGroup) return targetGroup
+        }
+        return originalPickGroup ? originalPickGroup(groupId) : {}
+      }
+      return true
+    } catch (error) {
+      logger.debug('[QQBotIdMap]绑定QQ Bot路由失败', error)
+      return false
+    }
+  }
+
+  static patchQQSelfBotGetMsg (bot) {
+    if (!bot || bot.__qqbotIdMapGetMsgPatched || typeof bot.getMsg !== 'function') return false
+
+    const originalGetMsg = bot.getMsg.bind(bot)
+    Object.defineProperty(bot, '__qqbotIdMapGetMsgPatched', {
+      value: true,
+      enumerable: false,
+      configurable: true
+    })
+    Object.defineProperty(bot, '__qqbotIdMapGetMsg', {
+      value: originalGetMsg,
+      enumerable: false,
+      configurable: true
+    })
+
+    bot.getMsg = async (...args) => {
+      try {
+        return await originalGetMsg(...args)
+      } catch (error) {
+        if (String(error?.message || error).includes('client not online')) return null
+        throw error
+      }
+    }
+    return true
   }
 
   static getFirstAtQQ (message) {
@@ -1031,6 +1201,12 @@ class QQBotIdMap {
         }
         Bot.gl?.set(groupQQ, group)
         Bot[self_id].gl?.set(groupQQ, group)
+        this.patchQQSelfBotRoute({
+          qq_self_id: self_id,
+          qqbot_self_id: e.qqbot_self_id || e.qqbot_appid,
+          group_qq: groupQQ,
+          group_openid: openidGroupId
+        })
       }
 
       if (qq) {

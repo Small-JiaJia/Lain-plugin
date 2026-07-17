@@ -255,6 +255,7 @@ export default class adapterQQBot {
     e.tiny_id = tinyId
     e.time = data.timestamp
     e.self_id = this.id
+    e.bot = Bot[this.id]
     e.sendMsg = data.reply
     e.message = Array.isArray(e.message) ? e.message : []
     e.qqbot_message = e.message.map(i => ({ ...i }))

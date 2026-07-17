@@ -55,5 +55,6 @@ coverage/
 
 *.tar.gz
 .22009-plugin/
+.ws-plugin/
 Milky.js
 QQBot.js
