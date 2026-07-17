@@ -1,6 +1,7 @@
 import { Bot as QQBot } from 'qq-group-bot'
 import EventIndex from 'qq-group-bot/lib/event/index.js'
 import Constans from 'qq-group-bot/lib/constans.js'
+import axios from 'axios'
 import Cfg from '../../../../lib/config/config.js'
 import common from '../../lib/common/common.js'
 
@@ -20,8 +21,14 @@ export default class QQSDK {
     this.QQBot = this.config.appid
     /** QQGuidID */
     this.QQGuid = `qg_${this.config.appid}`
-    /** 最大重连次数 */
-    this.config.maxRetry = this.config.maxRetry || 10
+    /**
+     * 最大重连次数。0 表示不限次数；以前使用 `||` 会把 0 重新设为 10。
+     * 这里的次数用于连接失败后的退避重试，WebSocket 正常断线仍由 SDK 处理。
+     */
+    this.config.maxRetry = this.config.maxRetry ?? 10
+    /** QQ OpenAPI 在网络较慢时 5 秒很容易超时，未配置时使用 10 秒。 */
+    const timeout = Number(this.config.timeout)
+    this.config.timeout = Number.isFinite(timeout) && timeout > 0 ? timeout : 10000
     /** 日志等级 */
     this.config.logLevel = Cfg.bot.log_level
     /** 频道模式 */
@@ -56,17 +63,26 @@ export default class QQSDK {
 
     /** 创建机器人 */
     this.sdk = new QQBot(this.config)
+    this.patchSessionManager()
+    this.patchLogger()
 
     /** WebHook 模式：仅获取 token，不启动 WebSocket */
     if (this.config.webhook) {
-      await this.sdk.sessionManager.getAccessToken()
+      try {
+        await this.getAccessToken()
+      } catch (err) {
+        this.logConnectionError('获取 access token 失败，将继续刷新', err)
+        this.scheduleTokenRefresh(30)
+      }
       this.active = true
     } else {
       /** WebSocket 模式：启动长连接 */
       await this.sdk.start()
     }
+  }
 
-    /** 修改sdk日志为喵崽日志 */
+  /** 修改 sdk 日志为喵崽日志，确保启动阶段的重试日志也能正常输出。 */
+  patchLogger () {
     this.sdk.logger = {
       info: (...log) => this.logger(...log),
       trace: (...log) => lain.trace(this.id, ...log),
@@ -76,6 +92,137 @@ export default class QQSDK {
       error: (...log) => lain.error(this.id, ...log),
       fatal: (...log) => lain.fatal(this.id, ...log)
     }
+  }
+
+  /**
+   * 修复 qq-group-bot 的两个不可恢复路径：
+   *
+   * 1. getWsUrl()/getAccessToken() 的 Axios 异常会直接让 start() reject；
+   * 2. token 的 setTimeout 回调没有 catch，刷新失败后后续刷新会彻底停止。
+   *
+   * 补丁只作用于当前机器人实例，不修改 node_modules。
+   */
+  patchSessionManager () {
+    const manager = this.sdk.sessionManager
+    const sdkStart = manager.start.bind(manager)
+
+    manager.getAccessToken = () => this.getAccessToken()
+    manager.getWsUrl = () => this.getWsUrl()
+
+    manager.start = async () => {
+      if (manager.userClose) return
+      if (this.connectingPromise) return this.connectingPromise
+
+      const connect = sdkStart().catch(err => {
+        this.scheduleReconnect(err)
+      })
+      this.connectingPromise = connect.finally(() => {
+        this.connectingPromise = null
+      })
+      return this.connectingPromise
+    }
+
+    // SDK 在 maxRetry 次 WebSocket 断线后会触发 DEAD 并不再调用 start()。
+    // 由适配器统一按照配置继续退避重试，0 表示无限重试。
+    manager.on('DEAD', data => {
+      manager.retry = 0
+      this.scheduleReconnect(new Error(data?.msg || 'WebSocket 连接已停止'))
+    })
+    manager.on('EVENT_WS', data => {
+      if (data?.eventType === 'READY') {
+        this.connectionRetry = 0
+        this.clearReconnectTimer()
+      }
+    })
+  }
+
+  /** 获取或刷新 AppAccessToken；并发调用共用同一个请求。 */
+  async getAccessToken (force = false) {
+    const manager = this.sdk.sessionManager
+    if (!force && manager.access_token && this.accessTokenExpiresAt > Date.now() + 60 * 1000) {
+      return { access_token: manager.access_token }
+    }
+    if (this.accessTokenPromise) return this.accessTokenPromise
+
+    this.accessTokenPromise = axios.post(
+      'https://bots.qq.com/app/getAppAccessToken',
+      {
+        appId: this.config.appid,
+        clientSecret: this.config.secret || this.config.clientSecret
+      },
+      { timeout: this.config.timeout }
+    ).then(({ data }) => {
+      if (!data?.access_token) throw new Error('获取 access token 的响应不包含 access_token')
+
+      const expiresIn = Number(data.expires_in)
+      const validFor = Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 300
+      manager.access_token = data.access_token
+      this.accessTokenExpiresAt = Date.now() + validFor * 1000
+      this.scheduleTokenRefresh(Math.max(30, validFor - 60))
+      return data
+    }).finally(() => {
+      this.accessTokenPromise = null
+    })
+    return this.accessTokenPromise
+  }
+
+  /** 获取网关地址。异常会交给 manager.start 的重试逻辑处理。 */
+  async getWsUrl () {
+    const { data } = await this.sdk.request.get('/gateway/bot', {
+      headers: {
+        Accept: '*/*',
+        'Accept-Encoding': 'utf-8',
+        'Accept-Language': 'zh-CN,zh;q=0.8',
+        Connection: 'keep-alive',
+        'User-Agent': 'v1',
+        Authorization: ''
+      }
+    })
+    if (!data?.url) throw new Error('获取 WebSocket 网关地址失败：响应中没有 url')
+    this.sdk.sessionManager.wsUrl = data.url
+  }
+
+  /** 到期前刷新 token；刷新失败后仍会在 30 秒后继续尝试。 */
+  scheduleTokenRefresh (afterSeconds) {
+    clearTimeout(this.tokenRefreshTimer)
+    const delay = Math.max(1, Number(afterSeconds) || 30) * 1000
+    this.tokenRefreshTimer = setTimeout(() => {
+      this.getAccessToken(true).catch(err => {
+        this.logConnectionError('刷新 access token 失败，30 秒后重试', err)
+        this.scheduleTokenRefresh(30)
+      })
+    }, delay)
+  }
+
+  /** 网络错误后指数退避重连，避免超时时形成高频请求。 */
+  scheduleReconnect (err) {
+    const manager = this.sdk.sessionManager
+    if (manager.userClose || this.reconnectTimer) return
+
+    const maxRetry = Number(this.config.maxRetry)
+    const retryLimit = Number.isFinite(maxRetry) && maxRetry >= 0 ? maxRetry : 10
+    if (retryLimit > 0 && this.connectionRetry >= retryLimit) {
+      this.logConnectionError(`连接连续失败 ${retryLimit} 次，已停止重试；将 maxRetry 设为 0 可无限重试`, err)
+      return
+    }
+
+    this.connectionRetry = (this.connectionRetry || 0) + 1
+    const delay = Math.min(5000 * 2 ** (this.connectionRetry - 1), 60000)
+    this.logConnectionError(`连接失败，第 ${this.connectionRetry} 次重试将在 ${delay / 1000} 秒后进行`, err)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      manager.start().catch(error => this.scheduleReconnect(error))
+    }, delay)
+  }
+
+  clearReconnectTimer () {
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+  }
+
+  logConnectionError (message, err) {
+    const detail = err?.code || err?.response?.status || err?.message || String(err)
+    lain.warn(this.id, `[QQBot] ${message}: ${detail}`)
   }
 
   /** WebHook 模式：将平台推送的事件注入 SDK */

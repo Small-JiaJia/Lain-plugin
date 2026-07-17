@@ -340,16 +340,19 @@ export default class adapterQQGuild {
     let { Pieces, messageLog } = await this.getQQGuild(msg)
     const info = data.message_type === 'group' ? '频道' : '私信'
     lain.info(this.id, `<回复${info}:${data.group_name}(${data.group_id})> => ${messageLog}`)
+    let result
     for (const item of Pieces) {
       try {
         lain.debug(`发送回复${info}消息：`, JSON.stringify(item))
         let res = await data.data.reply(item, quote)
         res.message_id = res.id
+        result ||= res
         lain.debug(`回复${info}消息返回：`, res)
       } catch (error) {
         console.error(error)
       }
     }
+    return result
   }
 
   /** 官方 Markdown 回复：统一使用 content 发送 */

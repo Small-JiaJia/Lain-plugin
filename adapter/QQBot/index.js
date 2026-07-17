@@ -36,7 +36,7 @@ export default class adapterQQBot {
       data = await this.message(data, true)
       if (data) {
         await QQBotIdMap.handleQQBotGroupMessage(data, async e => {
-          QQBotIdMap.logInfo(this.id, 'QQBot传入云崽message.group', e)
+          QQBotIdMap.logDebug(this.id, 'QQBot传入云崽message.group', e)
           await Bot.emit('message.group', e)
           await Bot.emit('message', e)
         })
@@ -1015,12 +1015,17 @@ export default class adapterQQBot {
         userId = await Bot.QQToOpenid(userId, e, 'user')
       } catch { }
     }
-    Pieces.forEach(i => {
+    let result
+    for (let i of Pieces) {
       if (reply) i = Array.isArray(i) ? [...i, reply] : [i, reply]
-      this.sdk.sendPrivateMessage(userId, i, this.sdk)
+      const res = await this.sdk.sendPrivateMessage(userId, i, this.sdk)
+      // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
+      result ||= res
       logger.debug('发送主动好友消息：', JSON.stringify(i))
       this.send_count()
-    })
+    }
+    if (!result) throw new Error('QQBot 未返回私聊消息 ID')
+    return this.returnResult(result)
   }
 
   /** 发送群消息 */
@@ -1044,12 +1049,17 @@ export default class adapterQQBot {
       }
     }
 
-    Pieces.forEach(i => {
+    let result
+    for (let i of Pieces) {
       if (reply) i = Array.isArray(i) ? [...i, reply] : [i, reply]
-      this.sdk.sendGroupMessage(groupID, i, this.sdk)
+      const res = await this.sdk.sendGroupMessage(groupID, i, this.sdk)
+      // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
+      result ||= res
       this.send_count()
       logger.debug('发送主动群消息：', JSON.stringify(i))
-    })
+    }
+    if (!result) throw new Error('QQBot 未返回群消息 ID')
+    return this.returnResult(result)
   }
 
   /** 快速回复 */
