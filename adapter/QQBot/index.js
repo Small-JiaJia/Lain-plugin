@@ -33,6 +33,7 @@ export default class adapterQQBot {
   async StartBot() {
     /** 群消息 */
     this.sdk.on('message.group', async (data) => {
+      if (await this.isDuplicateMessage(data, 'group')) return
       data = await this.message(data, true)
       if (data) {
         await QQBotIdMap.handleQQBotGroupMessage(data, async e => {
@@ -44,6 +45,7 @@ export default class adapterQQBot {
     })
     /** 私聊消息 */
     this.sdk.on('message.private.friend', async (data) => {
+      if (await this.isDuplicateMessage(data, 'private')) return
       data = await this.message(data)
       if (data) {
         await Bot.emit('message.private', data)
@@ -56,19 +58,21 @@ export default class adapterQQBot {
       await this.handleInteraction(event)
     })
 
-    /** 群/好友 通知事件 */
-    this.sdk.on('notice.group.increase', async (data) => {
-      lain.info(this.id, '群增加: ' + (data.group_id || ''))
-    })
-    this.sdk.on('notice.group.decrease', async (data) => {
-      lain.info(this.id, '群减少: ' + (data.group_id || ''))
-    })
-    this.sdk.on('notice.friend.increase', async (data) => {
-      lain.info(this.id, '好友增加: ' + (data.user_id || ''))
-    })
-    this.sdk.on('notice.friend.decrease', async (data) => {
-      lain.info(this.id, '好友减少: ' + (data.user_id || ''))
-    })
+    /** 群/好友通知：SDK 仅产生日志，适配器需要转发给 YunZai 和 OneBot */
+    for (const event of [
+      'notice.group.increase',
+      'notice.group.decrease',
+      'notice.group.receive_open',
+      'notice.group.receive_close',
+      'notice.friend.increase',
+      'notice.friend.decrease',
+      'notice.friend.receive_open',
+      'notice.friend.receive_close',
+    ]) {
+      this.sdk.on(event, async data => {
+        await this.handleNotice(event, data)
+      })
+    }
 
     // 有点怪 先简单处理下
     let id, avatar, username
@@ -132,6 +136,87 @@ export default class adapterQQBot {
     return `QQBot：[${username}(${this.id})] 连接成功!`
   }
 
+  /** 将 QQBot 群/C2C 通知转换为 YunZai/OneBot 通知事件 */
+  async handleNotice (event, data = {}) {
+    const [, scene = '', subType = ''] = String(event).split('.')
+    const isGroup = scene === 'group'
+    const rawGroupId = data.group_id || data.group_openid
+    const rawUserId = data.user_id || data.openid || data.operator_id || data.op_member_openid
+    const rawOperatorId = data.operator_id || data.op_member_openid || rawUserId
+    const groupId = isGroup ? this.formatQQBotId(rawGroupId) : undefined
+    // 群增减事件表示机器人自身加入/离开，官方载荷没有 user_id。
+    const userId = rawUserId ? this.formatQQBotId(rawUserId) : (isGroup ? this.id : undefined)
+    const operatorId = rawOperatorId ? this.formatQQBotId(rawOperatorId) : (isGroup ? this.id : undefined)
+    const time = Number(data.time || data.timestamp) || Date.now()
+    const notice = {
+      ...data,
+      raw: data,
+      post_type: 'notice',
+      notice_type: scene,
+      sub_type: subType,
+      self_id: this.id,
+      uin: this.id,
+      bot: Bot[this.id],
+      time: time > 1e12 ? Math.floor(time / 1000) : time,
+      group_id: groupId,
+      user_id: userId,
+      operator_id: operatorId,
+      group_openid: rawGroupId || '',
+      user_openid: rawUserId || '',
+      operator_openid: rawOperatorId || '',
+      adapter: 'QQBot',
+    }
+
+    if (isGroup && groupId) {
+      if (subType === 'increase') Bot[this.id]?.gl.set(groupId, { group_id: groupId })
+      if (subType === 'decrease') Bot[this.id]?.gl.delete(groupId)
+      notice.group = this.pickGroup(rawGroupId)
+    } else if (!isGroup && userId) {
+      if (subType === 'increase') Bot[this.id]?.fl.set(userId, { user_id: userId })
+      if (subType === 'decrease') Bot[this.id]?.fl.delete(userId)
+      notice.friend = this.pickFriend(rawUserId)
+    }
+
+    lain.info(this.id, `${isGroup ? '群' : '好友'}通知 ${subType}: ${rawGroupId || rawUserId || ''}`)
+    await Bot.emit(`notice.${scene}`, notice)
+    await Bot.emit(event, notice)
+    await Bot.emit('notice', notice)
+  }
+
+  /**
+   * 官方可能重复投递相同 msg_id；使用 Redis 跨重启去重，并在 Redis 不可用时
+   * 回退到进程内缓存。保留十分钟，覆盖群聊/私聊被动回复的有效窗口。
+   */
+  async isDuplicateMessage (data, type) {
+    const messageId = data?.id || data?.message_id
+    if (!messageId) return false
+
+    const now = Date.now()
+    this.messageDedup ??= new Map()
+    for (const [id, expiresAt] of this.messageDedup) {
+      if (expiresAt <= now) this.messageDedup.delete(id)
+    }
+
+    const memoryKey = `${type}:${messageId}`
+    if (this.messageDedup.has(memoryKey)) {
+      lain.debug(this.id, `[QQBot] 忽略重复 ${type} 消息: ${messageId}`)
+      return true
+    }
+    this.messageDedup.set(memoryKey, now + 10 * 60 * 1000)
+
+    try {
+      const key = `lain:qqbot:dedup:${this.id}:${type}:${messageId}`
+      const result = await redis.set(key, '1', { NX: true, EX: 600 })
+      if (result === null) {
+        lain.debug(this.id, `[QQBot] 忽略重复 ${type} 消息: ${messageId}`)
+        return true
+      }
+    } catch {
+      // Redis 异常时保留内存去重，不影响消息收发。
+    }
+    return false
+  }
+
   /** 加载缓存中的群、好友列表 */
   async gmlList(type = 'gl') {
     try {
@@ -158,6 +243,11 @@ export default class adapterQQBot {
       sendMsg: async (msg) => await this.sendGroupMsg(groupID, msg),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getChatHistory: async () => [],
+      /** OneBot upload_group_file 兼容；QQ群 Bot 不支持目录，folder 参数会被忽略。 */
+      fs: {
+        upload: async (file, folder = '/', name) => await this.sendGroupFile(groupID, file, name)
+      },
+      sendFile: async (file, name) => await this.sendGroupFile(groupID, file, name),
       pickMember: (userID) => this.pickMember(groupID, userID),
       /** 戳一戳 */
       pokeMember: async (operatorId) => '',
@@ -186,6 +276,8 @@ export default class adapterQQBot {
       recallMsg: async (msg_id) => await this.recallPrivateMsg(userId, msg_id),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getChatHistory: async () => [],
+      /** OneBot upload_private_file 兼容。 */
+      sendFile: async (file, name) => await this.sendFriendFile(userId, file, name),
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId)
     }
   }
@@ -231,6 +323,93 @@ export default class adapterQQBot {
     return await this.sdk.recallPrivateMessage(user_id, message_id)
   }
 
+  /**
+   * QQ 富媒体文件：先上传文件，再通过 msg_type=7 发送 file_info。
+   * https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-media.html
+   */
+  async uploadRichFile (targetType, targetId, file, name) {
+    let upload = await this.resolveUploadFile(file, name)
+    const sendUpload = async value => await this.sdk.request.post(`/v2/${targetType}s/${targetId}/files`, {
+      file_type: 4,
+      // false 时只取得 file_info，随后由发送消息接口统一发送。
+      srv_send_msg: false,
+      file_name: value.name,
+      ...(value.fileData ? { file_data: value.fileData } : { url: value.url })
+    })
+
+    let response
+    try {
+      response = await sendUpload(upload)
+    } catch (error) {
+      // 外部 URL 可能只能被机器人服务器访问，QQ 服务端下载失败（850011）时
+      // 尝试由本机下载后使用 file_data 直传。
+      if (!upload.fileData && this.isQQFileDownloadError(error)) {
+        upload = await this.resolveUploadFile(file, name, true)
+        response = await sendUpload(upload)
+      } else {
+        throw error
+      }
+    }
+
+    const { data } = response
+    if (!data?.file_info) throw new Error('QQBot 文件上传失败：响应中没有 file_info')
+    return { ...data, name: upload.name, url: upload.url }
+  }
+
+  /** 发送 QQ 富媒体文件消息。sourceId 存在时按被动回复发送。 */
+  async sendRichFile (targetType, targetId, file, name, sourceId) {
+    const uploaded = await this.uploadRichFile(targetType, targetId, file, name)
+    const payload = {
+      content: uploaded.name || '文件',
+      msg_type: 7,
+      media: { file_info: uploaded.file_info }
+    }
+    if (sourceId) {
+      payload.msg_id = sourceId
+      payload.msg_seq = Math.floor(Math.random() * 1000000) + 1
+      payload.message_reference = { message_id: sourceId }
+    }
+    const { data } = await this.sdk.request.post(`/v2/${targetType}s/${targetId}/messages`, payload)
+    if (!data?.id) throw new Error('QQBot 文件消息发送失败：响应中没有消息 ID')
+    return { ...data, file_id: uploaded.file_uuid, file_info: uploaded.file_info }
+  }
+
+  /**
+   * 兼容本地路径、base64、Buffer 与 URL。
+   * 本地内容使用官方 file_data Base64 直传，避免 QQ 服务端访问不到云崽内网地址。
+   */
+  async resolveUploadFile (file, name, preferFileData = false) {
+    const source = file?.url || file?.file || file
+    if (!source) throw new Error('QQBot 文件上传失败：缺少 file 参数')
+
+    const normalized = await Bot.FormatFile(source)
+    const fileName = name || file?.name || this.getUploadFileName(source)
+    const isHttpUrl = typeof normalized === 'string' && /^https?:\/\//.test(normalized)
+    if (isHttpUrl && !preferFileData) {
+      return { url: normalized, name: fileName }
+    }
+
+    return {
+      name: fileName,
+      fileData: (await Bot.Buffer(normalized)).toString('base64')
+    }
+  }
+
+  isQQFileDownloadError (error) {
+    return Number(error?.response?.data?.code) === 850011 || /code\(850011\)|download file error/i.test(String(error?.message || error))
+  }
+
+  getUploadFileName (file) {
+    if (typeof file !== 'string') return 'file'
+    const clean = file.replace(/^file:\/\//, '').split('?')[0]
+    try {
+      const pathname = /^https?:\/\//.test(file) ? new URL(file).pathname : clean
+      return decodeURIComponent(path.basename(pathname)) || 'file'
+    } catch {
+      return path.basename(clean) || 'file'
+    }
+  }
+
   /** 转换格式给云崽处理 */
   async message(data, isGroup) {
     QQBotIdMap.logDebug(this.id, 'QQBot转换前data', data)
@@ -257,7 +436,7 @@ export default class adapterQQBot {
     e.self_id = this.id
     e.bot = Bot[this.id]
     e.sendMsg = data.reply
-    e.message = Array.isArray(e.message) ? e.message : []
+    e.message = this.normalizeIncomingAttachments(Array.isArray(e.message) ? e.message : [])
     e.qqbot_message = e.message.map(i => ({ ...i }))
     e.raw_message = String(e.raw_message || '').trim()
     this.normalizeIncomingMessage(e, tinyId)
@@ -381,6 +560,33 @@ export default class adapterQQBot {
     /** dau统计 */
     this.msg_count(data)
     return e
+  }
+
+  /** 将官方附件转换成云崽/OneBot 可识别的 image、record、video、file 段。 */
+  normalizeIncomingAttachments (message) {
+    return message.map(item => {
+      if (!item || typeof item !== 'object') return item
+      const type = String(item.type || '').toLowerCase()
+      const url = item.url || item.voice_wav_url
+
+      if (type === 'voice' || type === 'audio') {
+        return { ...item, type: 'record', file: item.voice_wav_url || url, url }
+      }
+      if (type === 'image' || type === 'video') {
+        return { ...item, file: item.file || url, url }
+      }
+      // 官方 file 附件可能是 file，也可能因 MIME 类型被 SDK 解析成 application。
+      if (type === 'file' || type === 'application' || (url && item.name && !['text', 'at', 'face'].includes(type))) {
+        return {
+          ...item,
+          type: 'file',
+          file: item.file || url,
+          url,
+          name: item.name || item.filename || this.getUploadFileName(url || 'file')
+        }
+      }
+      return item
+    })
   }
 
   normalizeIncomingMessage(e, tinyId) {
@@ -653,14 +859,20 @@ export default class adapterQQBot {
         case 'audio':
         case 'ark':
         case 'embed':
-        case 'file':
         default:
           await flushMarkdown()
           if (i.type === 'record') i = await this.getAudio(i.file)
           else if (i.type === 'audio') i = await this.getAudio(i.file || i.url)
           else if (i.type === 'video') i = await this.getVideo(i?.url || i.file)
-          else if (i.type === 'file' && i.file) i = { type: 'text', text: `文件：${i.file}` }
           message.push(i)
+          break
+        case 'file':
+          await flushMarkdown()
+          message.push({
+            type: 'file',
+            file: i.file || i.url || i.data?.file,
+            name: i.name || i.data?.name
+          })
           break
       }
     }
@@ -1018,7 +1230,7 @@ export default class adapterQQBot {
     let result
     for (let i of Pieces) {
       if (reply) i = Array.isArray(i) ? [...i, reply] : [i, reply]
-      const res = await this.sdk.sendPrivateMessage(userId, i, this.sdk)
+      const res = await this.sendQQBotPiece('user', userId, i)
       // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
       result ||= res
       logger.debug('发送主动好友消息：', JSON.stringify(i))
@@ -1052,7 +1264,7 @@ export default class adapterQQBot {
     let result
     for (let i of Pieces) {
       if (reply) i = Array.isArray(i) ? [...i, reply] : [i, reply]
-      const res = await this.sdk.sendGroupMessage(groupID, i, this.sdk)
+      const res = await this.sendQQBotPiece('group', groupID, i)
       // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
       result ||= res
       this.send_count()
@@ -1060,6 +1272,47 @@ export default class adapterQQBot {
     }
     if (!result) throw new Error('QQBot 未返回群消息 ID')
     return this.returnResult(result)
+  }
+
+  /** 主动发送 OneBot 文件。 */
+  async sendFriendFile (userId, file, name) {
+    userId = String(userId).split('-').pop() || userId
+    return this.returnResult(await this.sendRichFile('user', userId, file, name))
+  }
+
+  /** 主动发送 OneBot 文件。 */
+  async sendGroupFile (groupID, file, name) {
+    let e = { bot: Bot[this.id], group_id: groupID, user_id: 'QQBot' }
+    if (Bot.QQToOpenid) {
+      try {
+        groupID = await Bot.QQToOpenid(groupID, e, 'group')
+      } catch {
+        groupID = String(groupID).split('-')[1] || String(groupID).split('-')[0] || groupID
+      }
+    }
+    return this.returnResult(await this.sendRichFile('group', groupID, file, name))
+  }
+
+  /** 一条云崽消息可包含普通内容和文件；文件通过富媒体接口单独发送。 */
+  async sendQQBotPiece (targetType, targetId, message, sourceId) {
+    const parts = common.array(message)
+    const files = parts.filter(item => item?.type === 'file')
+    const normal = parts.filter(item => item?.type !== 'file')
+    const reply = normal.find(item => item?.type === 'reply')
+    const normalContent = normal.filter(item => item?.type !== 'reply')
+    const fileSourceId = sourceId || reply?.id
+    let result
+
+    for (const file of files) {
+      result ||= await this.sendRichFile(targetType, targetId, file.file || file.url, file.name, fileSourceId)
+    }
+    // 文件消息的 reply 段已被转换为 msg_id；避免再单独发送一个空引用消息。
+    if (normalContent.length) {
+      const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
+      result ||= await send(targetId, normal, this.sdk)
+    }
+    if (!result) throw new Error('QQBot 消息内容为空')
+    return result
   }
 
   /** 快速回复 */
@@ -1098,9 +1351,9 @@ export default class adapterQQBot {
       const replyId = e.qqbot_message_id || e.message_id
       msg = Array.isArray(msg) ? [{ type: 'reply', id: replyId }, ...msg] : [{ type: 'reply', id: replyId }, msg]
       if (!e.friend) {
-        return { ok: true, data: await this.sdk.sendGroupMessage(e.data.group_id, msg, this.sdk) }
+        return { ok: true, data: await this.sendQQBotPiece('group', e.data.group_id, msg, replyId) }
       } else {
-        return { ok: true, data: await this.sdk.sendPrivateMessage(e.data.user_id, msg, this.sdk) }
+        return { ok: true, data: await this.sendQQBotPiece('user', e.data.user_id, msg, replyId) }
       }
     } catch (err) {
       const error = err.message || err
