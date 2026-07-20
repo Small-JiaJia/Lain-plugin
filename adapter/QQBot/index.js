@@ -115,6 +115,8 @@ export default class adapterQQBot {
       getFriendMap: () => Bot[this.id].fl,
       getGroupList: () => Bot[this.id].gl,
       getGuildList: () => Bot[this.id].tl,
+      // 与 OneBotV11 适配器保持一致：此入口始终是主动私聊发送。
+      sendPrivateMsg: async (userId, msg) => await this.sendFriendMsg(userId, msg),
       readMsg: async () => common.recvMsg(this.id, 'QQBot', true),
       MsgTotal: async (type) => common.MsgTotal(this.id, 'QQBot', type, true),
       pickGroup: (groupID) => this.pickGroup(groupID),
@@ -1210,7 +1212,10 @@ export default class adapterQQBot {
     }
   }
 
-  /** 发送好友消息 */
+  /**
+   * 发送好友主动消息。
+   * 不携带 msg_id/event_id，受 QQBot 用户主动消息开关与平台频控约束。
+   */
   async sendFriendMsg(userId, data) {
     userId = userId.split('-')?.[1] || userId
     /** 构建一个普通e给按钮用 */
@@ -1240,7 +1245,10 @@ export default class adapterQQBot {
     return this.returnResult(result)
   }
 
-  /** 发送群消息 */
+  /**
+   * 发送群主动消息。
+   * 不携带 msg_id/event_id；群主须开启机器人主动发言权限。
+   */
   async sendGroupMsg(groupID, data) {
     /** 构建一个普通e给按钮用 */
     let e = {
@@ -1309,7 +1317,8 @@ export default class adapterQQBot {
     // 文件消息的 reply 段已被转换为 msg_id；避免再单独发送一个空引用消息。
     if (normalContent.length) {
       const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
-      result ||= await send(targetId, normal, this.sdk)
+      // 不传 source，SDK 不会写入 msg_id，确保这里是官方定义的主动消息。
+      result ||= await send(targetId, normal)
     }
     if (!result) throw new Error('QQBot 消息内容为空')
     return result
