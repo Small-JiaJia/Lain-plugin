@@ -260,9 +260,20 @@ export default class QQSDK {
     if (!parser || parser._lainOfficialMessageWrapped) return
 
     const wrapped = function (event, payload) {
+      payload = payload || {}
+      const reference = QQSDK.getMessageReference(payload)
+      // QQ 群消息的引用信息位于 message_scene.ext 和 msg_elements，旧 SDK
+      // 只识别 message_reference，导致引用段与 source 丢失。
+      if (reference && !payload.message_reference?.message_id) {
+        payload.message_reference = { message_id: reference.messageId }
+      }
+
       const officialMessage = Array.isArray(payload?.message)
         ? payload.message.map(i => ({ ...i }))
         : null
+      if (reference && officialMessage && !officialMessage.some(i => i?.type === 'reply')) {
+        officialMessage.unshift({ type: 'reply', id: reference.messageId })
+      }
       const officialRawMessage = typeof payload?.raw_message === 'string' ? payload.raw_message : null
       const result = parser.apply(this, [event, payload])
 
@@ -272,10 +283,46 @@ export default class QQSDK {
       if (result && officialRawMessage !== null) {
         result.raw_message = officialRawMessage
       }
+      if (result && reference) {
+        result.source = {
+          ...result.source,
+          id: reference.messageId,
+          message_id: reference.messageId,
+          qqbot_ref_msg_idx: reference.msgIdx,
+          raw_message: reference.content || result.source?.raw_message || ''
+        }
+      }
       return result
     }
     wrapped._lainOfficialMessageWrapped = true
     EventIndex.EventParserMap.set(eventName, wrapped)
+  }
+
+  /**
+   * 解析群聊引用消息。
+   * 官方 GROUP_MESSAGE_CREATE 回调将引用消息放在 msg_elements（message_type=103），
+   * 并使用 message_scene.ext 中的 ref_msg_idx 与元素 msg_idx 关联。
+   */
+  static getMessageReference (payload = {}) {
+    const directId = payload.message_reference?.message_id
+    if (directId) return { messageId: String(directId) }
+
+    const ext = Array.isArray(payload.message_scene?.ext) ? payload.message_scene.ext : []
+    const prefix = 'ref_msg_idx='
+    const msgIdx = ext.find(item => typeof item === 'string' && item.startsWith(prefix))?.slice(prefix.length)
+    if (!msgIdx) return undefined
+
+    const elements = Array.isArray(payload.msg_elements) ? payload.msg_elements : []
+    const element = elements.find(item => item?.msg_idx === msgIdx) ||
+      elements.find(item => Number(item?.message_type) === 103)
+    const messageId = element?.message_id || element?.msg_id || element?.id || element?.msg_idx || msgIdx
+    if (!messageId) return undefined
+
+    return {
+      messageId: String(messageId),
+      msgIdx,
+      content: typeof element?.content === 'string' ? element.content : ''
+    }
   }
 
   /** 全局注册一次 WebHook Express 路由 */

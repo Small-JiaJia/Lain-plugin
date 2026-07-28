@@ -2,9 +2,6 @@
 ## 简介
 `Lain-plugin`是一个围绕喵崽`Miao-Yunzai`开发的多适配器插件，让喵崽接入`QQ频道`、`微信`、`shamrock`、`KOOK`等三方平台~，不再局限于ICQQ。
 
-
-### 适用于`Lain-plugin`的`QQBot`适配器的统计插件:[22009-plugin](https://github.com/win-syswow64/22009-plugin)
-
 ## 使用
 ### 0. 前置：跳过云崽的ICQQ登录
 不想登录ICQQ并继续使用本插件：

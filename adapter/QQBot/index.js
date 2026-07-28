@@ -16,6 +16,8 @@ import QQBotIdMap from '../../model/qqbot-id-map.js'
 
 lain.DAU = {}
 
+const MESSAGE_CACHE_TTL = 12 * 60 * 60
+
 export default class adapterQQBot {
   /** 传入基本配置 */
   constructor(sdk, start) {
@@ -117,6 +119,8 @@ export default class adapterQQBot {
       getGuildList: () => Bot[this.id].tl,
       // 与 OneBotV11 适配器保持一致：此入口始终是主动私聊发送。
       sendPrivateMsg: async (userId, msg) => await this.sendFriendMsg(userId, msg),
+      /** 从 QQBot 半天消息缓存中读取消息，兼容 ICQQ 的 getMsg。 */
+      getMsg: async (messageId) => await this.getCachedMessageById(messageId),
       readMsg: async () => common.recvMsg(this.id, 'QQBot', true),
       MsgTotal: async (type) => common.MsgTotal(this.id, 'QQBot', type, true),
       pickGroup: (groupID) => this.pickGroup(groupID),
@@ -244,7 +248,8 @@ export default class adapterQQBot {
       recallMsg: async (msg_id) => await this.recallGroupMsg(groupID, msg_id),
       sendMsg: async (msg) => await this.sendGroupMsg(groupID, msg),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
-      getChatHistory: async () => [],
+      getMsg: async (msg_id) => await this.getCachedMessage('group', groupID, msg_id),
+      getChatHistory: async (msg_id, num = 1) => await this.getCachedChatHistory('group', groupID, msg_id, num),
       /** OneBot upload_group_file 兼容；QQ群 Bot 不支持目录，folder 参数会被忽略。 */
       fs: {
         upload: async (file, folder = '/', name) => await this.sendGroupFile(groupID, file, name)
@@ -277,7 +282,8 @@ export default class adapterQQBot {
       sendMsg: async (msg) => await this.sendFriendMsg(userId, msg),
       recallMsg: async (msg_id) => await this.recallPrivateMsg(userId, msg_id),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
-      getChatHistory: async () => [],
+      getMsg: async (msg_id) => await this.getCachedMessage('user', userId, msg_id),
+      getChatHistory: async (msg_id, num = 1) => await this.getCachedChatHistory('user', userId, msg_id, num),
       /** OneBot upload_private_file 兼容。 */
       sendFile: async (file, name) => await this.sendFriendFile(userId, file, name),
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId)
@@ -313,16 +319,176 @@ export default class adapterQQBot {
     return Number(id) ? `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${id}` : `https://q.qlogo.cn/qqapp/${this.id}/${id.split('-')[1] || id}/${size}`
   }
 
-  /** 撤回群消息 */
-  async recallGroupMsg(group_id, message_id) {
-    group_id = String(group_id).split('-').pop() || group_id
-    return await this.sdk.recallGroupMessage(group_id, message_id)
+  /**
+   * 将云崽/OneBot 使用的 ID 还原为 QQ 官方接口所需的 OpenID。
+   * 数字 QQ 号会通过映射表查询；官方 OpenID 仅移除本机器人添加的前缀，
+   * 避免错误截断 OpenID 中可能存在的连字符。
+   */
+  async resolveOpenid (id, type) {
+    let openid = String(id ?? '').trim()
+    if (!openid) throw new Error(`QQBot 撤回消息失败：缺少${type === 'group' ? '群' : '用户'} OpenID`)
+
+    const prefix = `${this.id}-`
+    if (openid.startsWith(prefix)) return openid.slice(prefix.length)
+
+    // 非纯数字 ID 已是官方 OpenID，不应交由 QQ 号映射表再次转换。
+    if (/^\d+$/.test(openid) && Bot.QQToOpenid) {
+      try {
+        const resolved = await Bot.QQToOpenid(openid, { bot: Bot[this.id], self_id: this.id }, type)
+        if (resolved) openid = String(resolved).trim()
+      } catch {
+        // 映射不存在时仍可使用消息事件中携带的原始 OpenID。
+      }
+    }
+
+    return openid.startsWith(prefix) ? openid.slice(prefix.length) : openid
   }
 
-  /** 撤回私聊消息 */
-  async recallPrivateMsg(user_id, message_id) {
-    user_id = String(user_id).split('-').pop() || user_id
-    return await this.sdk.recallPrivateMessage(user_id, message_id)
+  /** QQBot 消息缓存键；同时按 msg_idx 与 message_id 建索引，保存 12 小时。 */
+  getMessageCacheKey (type, targetId, keyType, value) {
+    return `lain:qqbot:message:${this.id}:${type}:${targetId}:${keyType}:${value}`
+  }
+
+  async getMessageCacheTarget (type, targetId) {
+    try {
+      return await this.resolveOpenid(targetId, type === 'group' ? 'group' : 'user')
+    } catch {
+      return String(targetId ?? '').trim()
+    }
+  }
+
+  getMessageSceneIndex (data = {}) {
+    const ext = Array.isArray(data.message_scene?.ext) ? data.message_scene.ext : []
+    const prefix = 'msg_idx='
+    return ext.find(item => typeof item === 'string' && item.startsWith(prefix))?.slice(prefix.length)
+  }
+
+  async getCachedMessage (type, targetId, identifier) {
+    const id = String(identifier ?? '').trim()
+    if (!id) return undefined
+
+    const target = await this.getMessageCacheTarget(type, targetId)
+    try {
+      const byIndex = await redis.get(this.getMessageCacheKey(type, target, 'idx', id))
+      const byId = byIndex || await redis.get(this.getMessageCacheKey(type, target, 'id', id))
+      return byId ? JSON.parse(byId) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  async getCachedMessageById (messageId) {
+    const id = String(messageId ?? '').trim()
+    if (!id) return undefined
+
+    try {
+      const data = await redis.get(`lain:qqbot:message:${this.id}:id:${id}`)
+      return data ? JSON.parse(data) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  async getCachedChatHistory (type, targetId, messageId, num = 1) {
+    const message = await this.getCachedMessage(type, targetId, messageId)
+    // QQ 官方暂未提供历史消息接口；此处返回缓存命中的锚点消息，
+    // 兼容依赖 getChatHistory(messageId, 1) 的 ICQQ 插件。
+    return message && Number(num) > 0 ? [message] : []
+  }
+
+  async cacheIncomingMessage (e, data, isGroup) {
+    const msgIdx = this.getMessageSceneIndex(data)
+    const messageId = String(data?.message_id || data?.id || e?.message_id || '').trim()
+    if (!msgIdx || !messageId) return
+
+    const type = isGroup ? 'group' : 'user'
+    const rawTargetId = isGroup
+      ? data.group_openid || data.group_id
+      : this.getMessageUserOpenid(data)
+    const targetId = await this.getMessageCacheTarget(type, rawTargetId)
+    if (!targetId) return
+
+    const record = {
+      id: messageId,
+      message_id: messageId,
+      msg_idx: msgIdx,
+      time: e.time,
+      seq: messageId,
+      message: e.message,
+      raw_message: e.raw_message,
+      content: data.content || '',
+      user_id: e.user_id,
+      group_id: e.group_id,
+      group_openid: data.group_openid || data.group_id || '',
+      user_openid: this.getMessageUserOpenid(data),
+      message_type: isGroup ? 'group' : 'private',
+      sender: e.sender
+    }
+    const value = JSON.stringify(record)
+
+    try {
+      await Promise.all([
+        redis.set(this.getMessageCacheKey(type, targetId, 'idx', msgIdx), value, { EX: MESSAGE_CACHE_TTL }),
+        redis.set(this.getMessageCacheKey(type, targetId, 'id', messageId), value, { EX: MESSAGE_CACHE_TTL }),
+        redis.set(`lain:qqbot:message:${this.id}:id:${messageId}`, value, { EX: MESSAGE_CACHE_TTL })
+      ])
+    } catch {
+      // Redis 不可用时不影响正常收发；引用消息将无法跨进程恢复。
+    }
+  }
+
+  async hydrateReferenceMessage (e, data, isGroup) {
+    const refIdx = e.source?.qqbot_ref_msg_idx
+    if (!refIdx) return
+
+    const type = isGroup ? 'group' : 'user'
+    const rawTargetId = isGroup
+      ? data.group_openid || data.group_id
+      : this.getMessageUserOpenid(data)
+    const cached = await this.getCachedMessage(type, rawTargetId, refIdx)
+    if (!cached) return
+
+    e.source = {
+      ...e.source,
+      ...cached,
+      id: cached.message_id,
+      message_id: cached.message_id,
+      qqbot_ref_msg_idx: refIdx
+    }
+    for (const message of e.message || []) {
+      if (message?.type === 'reply' && (message.id === refIdx || message.data?.id === refIdx)) {
+        message.id = cached.message_id
+        if (message.data?.id !== undefined) message.data.id = cached.message_id
+      }
+    }
+  }
+
+  /**
+   * 撤回群消息。
+   * https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages_message_id.delete.html
+   */
+  async recallGroupMsg (group_id, message_id) {
+    const groupOpenid = await this.resolveOpenid(group_id, 'group')
+    const messageId = String(message_id ?? '').trim()
+    if (!messageId) throw new Error('QQBot 撤回群消息失败：缺少消息 ID')
+
+    const response = await this.sdk.request.delete(
+      `/v2/groups/${encodeURIComponent(groupOpenid)}/messages/${encodeURIComponent(messageId)}`
+    )
+    // 官方接口成功时返回 HTTP 200，且没有响应体。
+    return response.status === 200
+  }
+
+  /** 撤回私聊消息。 */
+  async recallPrivateMsg (user_id, message_id) {
+    const userOpenid = await this.resolveOpenid(user_id, 'user')
+    const messageId = String(message_id ?? '').trim()
+    if (!messageId) throw new Error('QQBot 撤回私聊消息失败：缺少消息 ID')
+
+    const response = await this.sdk.request.delete(
+      `/v2/users/${encodeURIComponent(userOpenid)}/messages/${encodeURIComponent(messageId)}`
+    )
+    return response.status === 200
   }
 
   /**
@@ -460,6 +626,10 @@ export default class adapterQQBot {
       this.normalizeIncomingMessage(e, tinyId)
     }
     this.defineIncomingMsg(e)
+    // 先用 ref_msg_idx 恢复被引用消息的真实 message_id，再缓存当前消息的
+    // msg_idx → message_id 映射，供后续引用、撤回和历史消息查询使用。
+    await this.hydrateReferenceMessage(e, data, isGroup)
+    await this.cacheIncomingMessage(e, data, isGroup)
 
     /** 获取匹配的按钮行（供自动附加） */
     const getAutoButtons = async () => {
