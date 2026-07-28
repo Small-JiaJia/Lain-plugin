@@ -61,8 +61,8 @@ export class adapter extends plugin {
 
     /** 最低要求 */
     if (msg.length < 4) return await this.reply('格式错误', true, { at: true })
-    /** 判断开发者id */
-    if (msg[2].length != 9) return await this.reply('appid输入错误!', true, { at: true })
+    /** AppID 为数字且长度并非固定 9 位，兼容现有 10 位及后续长度。 */
+    if (!/^\d+$/.test(String(msg[2] || ''))) return await this.reply('appid输入错误!', true, { at: true })
 
     /** 看下是否配置已存在 */
     if (cfg.value('token', msg[2])) {
