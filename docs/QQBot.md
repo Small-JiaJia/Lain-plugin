@@ -80,6 +80,74 @@ AppSecret(机器人密钥)：`abcdefghijklmnopqrstuvwxyz`
 ```
 或者编辑 [config/token.yaml](../config/token.yaml) 配置文件，关闭将 `/` 转换为 `#`
 
+## 群管理（API v2）
+
+QQ群机器人已支持官方 API v2 的群成员禁言和入群自动审批策略。机器人必须是目标群的管理员；禁言只能操作普通成员，最长 30 天。
+
+```js
+const bot = Bot['机器人 AppID']
+const group = bot.pickGroup('群 OpenID')
+
+// 禁言 10 分钟；传 0 解除禁言
+await group.muteMember('成员 OpenID', 600)
+
+// 查询全员禁言规则和当前被禁言成员
+const status = await group.getMuteStatus()
+
+// 创建白名单入群自动审批策略（group_openids 与 group_ids 二选一）
+const strategy = await bot.createJoinApprovalStrategy({
+  group_openids: ['群 OpenID'],
+  is_enable: 'on'
+})
+await bot.updateJoinApprovalWhitelist(strategy.strategy_id, 'add', ['12345678'])
+await bot.executeJoinApprovalStrategy(strategy.strategy_id)
+```
+
+策略也可通过 `getJoinApprovalStrategies`、`updateJoinApprovalStrategy` 和 `deleteJoinApprovalStrategy` 查询、修改和删除。执行策略会异步扫描关联群，对白名单 QQ 号的入群申请自动通过。
+
+### 手动审批与申请事件
+
+```js
+const group = Bot['机器人 AppID'].pickGroup('群 OpenID')
+
+// 拉取待审批申请（limit 范围 1~100）
+const { list, next_cursor } = await group.getJoinRequests({ limit: 20 })
+
+// 通过指定成员的申请；申请列表中的 join_request_id 可用于精确指定该次申请
+await group.approveJoinRequest('成员 OpenID', true, {
+  join_request_id: list[0].join_request_id
+})
+
+// 拒绝并加入群黑名单
+await group.approveJoinRequest('成员 OpenID', false, {
+  join_request_id: list[0].join_request_id,
+  reject_reason: '暂不符合入群要求',
+  add_to_member_blacklist: true
+})
+```
+
+收到官方 `GROUP_JOIN_REQUEST` 后，适配器会触发 YunZai/icqq 兼容的 `request.group.add` 事件。事件中的 `flag` 和 `join_request_id` 均为官方申请 ID，可直接调用 `e.approve()`：
+
+```js
+Bot.on('request.group.add', async e => {
+  if (e.adapter === 'QQBot') await e.approve(true)
+})
+```
+
+此外，主人可直接通过消息命令手动管理申请：
+
+```
+# QQ 群内：
+#QQBot入群申请列表 [单页数量] [cursor]
+#QQBot审批入群申请 <成员OpenID> <同意|拒绝> [申请ID] [理由]
+
+# 私聊或非目标群内（首个参数显式指定群 OpenID）：
+#QQBot入群申请列表 <群OpenID> [单页数量] [cursor]
+#QQBot审批入群申请 <群OpenID> <成员OpenID> <同意|拒绝> [申请ID] [理由]
+```
+
+拒绝理由中加入 `--拉黑`，可在拒绝时同时将申请人加入群黑名单。
+
 
 <details><summary>方法1图床编写参考</summary>
 

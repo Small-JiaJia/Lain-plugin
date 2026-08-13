@@ -57,6 +57,11 @@ export default class adapterQQBot {
       }
     })
 
+    /** 用户申请加入机器人所在群，转换为 YunZai/icqq request.group.add 事件。 */
+    this.sdk.on('request.group.add', async data => {
+      await this.handleGroupJoinRequest(data)
+    })
+
     /** 按钮交互事件（回调/表单） */
     this.sdk.on('interaction', async (event) => {
       await this.handleInteraction(event)
@@ -129,7 +134,20 @@ export default class adapterQQBot {
       pickUser: (userId) => this.pickFriend(userId),
       pickFriend: (userId) => this.pickFriend(userId),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
-      getGroupMemberInfo: (group_id, user_id) => Bot.getGroupMemberInfo(group_id, user_id)
+      getGroupMemberInfo: (group_id, user_id) => Bot.getGroupMemberInfo(group_id, user_id),
+      /** QQ Bot v2 群管理：群禁言与入群自动审批策略。 */
+      getGroupMuteStatus: async groupId => await this.getGroupMuteStatus(groupId),
+      setGroupMemberMute: async (groupId, userId, duration) => await this.setGroupMemberMute(groupId, userId, duration),
+      setGroupMemberMutes: async (groupId, members) => await this.setGroupMemberMutes(groupId, members),
+      getGroupJoinRequests: async (groupId, options) => await this.getGroupJoinRequests(groupId, options),
+      approveGroupJoinRequest: async (groupId, memberId, approve, options) => await this.approveGroupJoinRequest(groupId, memberId, approve, options),
+      setGroupAddRequest: async (groupId, memberId, approve, reason, options) => await this.approveGroupJoinRequest(groupId, memberId, approve, { ...options, reject_reason: reason }),
+      getJoinApprovalStrategies: async options => await this.getJoinApprovalStrategies(options),
+      createJoinApprovalStrategy: async strategy => await this.createJoinApprovalStrategy(strategy),
+      updateJoinApprovalStrategy: async (strategyId, strategy) => await this.updateJoinApprovalStrategy(strategyId, strategy),
+      deleteJoinApprovalStrategy: async strategyId => await this.deleteJoinApprovalStrategy(strategyId),
+      executeJoinApprovalStrategy: async strategyId => await this.executeJoinApprovalStrategy(strategyId),
+      updateJoinApprovalWhitelist: async (strategyId, op, users) => await this.updateJoinApprovalWhitelist(strategyId, op, users)
     }
     /** 加载缓存中的群列表 */
     this.gmlList('gl')
@@ -189,6 +207,62 @@ export default class adapterQQBot {
     await Bot.emit(`notice.${scene}`, notice)
     await Bot.emit(event, notice)
     await Bot.emit('notice', notice)
+  }
+
+  /**
+   * 将 GROUP_JOIN_REQUEST 适配为 icqq/YunZai 的 request.group.add。
+   * flag 保留官方 join_request_id，方便第三方插件直接调用 e.approve()。
+   */
+  async handleGroupJoinRequest (data = {}) {
+    const groupOpenid = String(data.group_openid || data.group_id || '').trim()
+    const memberOpenid = String(data.member_openid || data.user_id || '').trim()
+    if (!groupOpenid || !memberOpenid) {
+      lain.warn(this.id, '[QQBot] 忽略不完整的 GROUP_JOIN_REQUEST 事件')
+      return false
+    }
+
+    const applyAt = new Date(data.apply_at || data.timestamp || Date.now())
+    const time = Number.isNaN(applyAt.getTime())
+      ? Math.floor(Date.now() / 1000)
+      : Math.floor(applyAt.getTime() / 1000)
+    const verifyInfo = data.verify_info || {}
+    const comment = verifyInfo.verify_message || data.comment || ''
+    const request = {
+      ...data,
+      raw: data,
+      post_type: 'request',
+      request_type: 'group',
+      sub_type: 'add',
+      self_id: this.id,
+      uin: this.id,
+      bot: Bot[this.id],
+      adapter: 'QQBot',
+      time,
+      group_id: this.formatQQBotId(groupOpenid),
+      user_id: this.formatQQBotId(memberOpenid),
+      group_openid: groupOpenid,
+      member_openid: memberOpenid,
+      user_openid: memberOpenid,
+      flag: data.join_request_id,
+      join_request_id: data.join_request_id,
+      comment,
+      tips: comment,
+      group: this.pickGroup(groupOpenid),
+      member: this.member(groupOpenid, memberOpenid)
+    }
+    request.approve = async (approve = true, rejectReason = '', addToMemberBlacklist = false) => {
+      return await this.approveGroupJoinRequest(groupOpenid, memberOpenid, approve, {
+        join_request_id: data.join_request_id,
+        reject_reason: rejectReason,
+        add_to_member_blacklist: addToMemberBlacklist
+      })
+    }
+
+    lain.info(this.id, `用户申请入群: ${data.username || memberOpenid}(${memberOpenid}) -> ${groupOpenid}`)
+    await Bot.emit('request.group', request)
+    await Bot.emit('request.group.add', request)
+    await Bot.emit('request', request)
+    return request
   }
 
   /**
@@ -260,8 +334,14 @@ export default class adapterQQBot {
       pickMember: (userID) => this.pickMember(groupID, userID),
       /** 戳一戳 */
       pokeMember: async (operatorId) => '',
-      /** 禁言 */
-      muteMember: async (groupId, userId, time) => Promise.reject(new Error('QQBot未支持')),
+      /** 禁言。time 为秒数，传 0 可解除禁言。 */
+      muteMember: async (userId, time) => await this.setGroupMemberMute(groupID, userId, time),
+      /** 查询群禁言状态（含当前被禁言成员）。 */
+      getMuteStatus: async () => await this.getGroupMuteStatus(groupID),
+      /** 拉取待处理的入群申请列表。 */
+      getJoinRequests: async options => await this.getGroupJoinRequests(groupID, options),
+      /** 审批入群申请；approve=false 时可通过 options.reject_reason 填写拒绝理由。 */
+      approveJoinRequest: async (memberId, approve = true, options) => await this.approveGroupJoinRequest(groupID, memberId, approve, options),
       /** 全体禁言 */
       muteAll: async (type) => Promise.reject(new Error('QQBot未支持')),
       getMemberMap: async () => Promise.reject(new Error('QQBot未支持')),
@@ -312,13 +392,240 @@ export default class adapterQQBot {
       is_owner: false,
       /** 获取头像 */
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId),
-      mute: async (time) => ''
+      /** 禁言当前成员；time 为秒数，传 0 可解除禁言。 */
+      mute: async (time) => await this.setGroupMemberMute(groupId, userId, time)
     }
     return member
   }
 
   getAvatarUrl(size = 0, id) {
     return Number(id) ? `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${id}` : `https://q.qlogo.cn/qqapp/${this.id}/${id.split('-')[1] || id}/${size}`
+  }
+
+  /**
+   * 查询群禁言状态。
+   * https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_restrict_chat_setting.get.html
+   */
+  async getGroupMuteStatus (groupId) {
+    const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const { data } = await this.sdk.request.get(
+      `/v2/groups/${encodeURIComponent(groupOpenid)}/restrict_chat_setting`
+    )
+    return data
+  }
+
+  /**
+   * 设置一名群成员禁言。duration 为秒数、Date 或 RFC3339 时间；0 表示解除禁言。
+   * QQ 官方接口要求机器人是群管理员，且仅能操作普通成员。
+   */
+  async setGroupMemberMute (groupId, userId, duration) {
+    const member = this.createMemberMuteOperation(userId, duration)
+    return await this.setGroupMemberMutes(groupId, [member])
+  }
+
+  /**
+   * 批量设置群成员禁言。members 的元素为 { member_openid, op, mute_expire_at }；
+   * 也兼容 { user_id, duration }，方便适配 OneBot 的禁言调用。
+   */
+  async setGroupMemberMutes (groupId, members) {
+    if (!Array.isArray(members) || !members.length) {
+      throw new Error('QQBot 设置群成员禁言失败：members 不能为空')
+    }
+    if (members.length > 10) {
+      throw new Error('QQBot 设置群成员禁言失败：单次最多操作 10 名成员')
+    }
+
+    const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const normalized = await Promise.all(members.map(async member => {
+      let operation
+      if (member?.member_openid && member?.op) {
+        operation = {
+          op: this.normalizeMemberMuteOp(member.op),
+          member_openid: member.member_openid,
+          mute_expire_at: member.mute_expire_at ?? ''
+        }
+      } else {
+        operation = this.createMemberMuteOperation(member?.user_id ?? member?.userId, member?.duration ?? member?.time)
+      }
+      return {
+        ...operation,
+        member_openid: await this.resolveOpenid(operation.member_openid, 'user')
+      }
+    }))
+
+    const { data } = await this.sdk.request.post(
+      `/v2/groups/${encodeURIComponent(groupOpenid)}/restrict_chat_setting`,
+      { members: normalized }
+    )
+    return data ?? true
+  }
+
+  createMemberMuteOperation (userId, duration) {
+    const memberOpenid = String(userId ?? '').trim()
+    if (!memberOpenid) throw new Error('QQBot 设置群成员禁言失败：缺少成员 OpenID')
+
+    if (duration === 0 || duration === '0' || duration === false || duration == null) {
+      return { op: 'del', member_openid: memberOpenid, mute_expire_at: '' }
+    }
+    return {
+      op: 'add',
+      member_openid: memberOpenid,
+      mute_expire_at: this.normalizeMuteExpireAt(duration)
+    }
+  }
+
+  normalizeMemberMuteOp (op) {
+    if (!['add', 'update', 'del'].includes(op)) {
+      throw new Error('QQBot 设置群成员禁言失败：op 只能是 add、update 或 del')
+    }
+    return op
+  }
+
+  normalizeMuteExpireAt (duration) {
+    let expiresAt
+    if (duration instanceof Date) {
+      expiresAt = duration
+    } else if (typeof duration === 'number' || /^\d+(?:\.\d+)?$/.test(String(duration))) {
+      const seconds = Number(duration)
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        throw new Error('QQBot 设置群成员禁言失败：禁言时长必须大于 0 秒')
+      }
+      expiresAt = new Date(Date.now() + seconds * 1000)
+    } else {
+      expiresAt = new Date(duration)
+    }
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new Error('QQBot 设置群成员禁言失败：禁言到期时间必须是有效的 RFC3339 时间或秒数')
+    }
+    if (expiresAt.getTime() <= Date.now()) {
+      throw new Error('QQBot 设置群成员禁言失败：禁言到期时间必须晚于当前时间')
+    }
+    if (expiresAt.getTime() > Date.now() + 30 * 24 * 60 * 60 * 1000) {
+      throw new Error('QQBot 设置群成员禁言失败：最大禁言时长为 30 天')
+    }
+    return expiresAt.toISOString()
+  }
+
+  /**
+   * 拉取群入群申请列表，options 支持 cursor、limit（默认 20，最大 100）。
+   * https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_join_request_list.get.html
+   */
+  async getGroupJoinRequests (groupId, options = {}) {
+    const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const limit = options.limit === undefined ? undefined : Number(options.limit)
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) {
+      throw new Error('QQBot 拉取入群申请失败：limit 必须是 1 至 100 的整数')
+    }
+    const { data } = await this.sdk.request.get(
+      `/v2/groups/${encodeURIComponent(groupOpenid)}/join_request_list`,
+      { params: { cursor: options.cursor, limit } }
+    )
+    return data
+  }
+
+  /**
+   * 审批群入群申请。approve=true 通过，false 拒绝；options 可传 join_request_id、
+   * reject_reason 与 add_to_member_blacklist。
+   */
+  async approveGroupJoinRequest (groupId, memberId, approve = true, options = {}) {
+    const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const memberOpenid = await this.resolveOpenid(memberId, 'user')
+    const op = typeof approve === 'string' ? approve : (approve ? 'approve' : 'decline')
+    if (!['approve', 'decline'].includes(op)) {
+      throw new Error('QQBot 审批入群申请失败：审批动作只能是 approve 或 decline')
+    }
+    if (options.add_to_member_blacklist && op !== 'decline') {
+      throw new Error('QQBot 审批入群申请失败：仅拒绝申请时可加入群黑名单')
+    }
+
+    const { data } = await this.sdk.request.post(
+      `/v2/groups/${encodeURIComponent(groupOpenid)}/approval_join_request/${encodeURIComponent(memberOpenid)}`,
+      {
+        op,
+        join_request_id: options.join_request_id ?? options.request_id ?? options.flag,
+        reject_reason: op === 'decline' ? options.reject_reason : undefined,
+        add_to_member_blacklist: op === 'decline' ? options.add_to_member_blacklist : undefined
+      }
+    )
+    return data ?? true
+  }
+
+  /** 查询入群自动审批策略，options 支持 cursor、limit。 */
+  async getJoinApprovalStrategies (options = {}) {
+    const { data } = await this.sdk.request.get('/v2/groups/join_approval_strategy', {
+      params: { cursor: options.cursor, limit: options.limit }
+    })
+    return data
+  }
+
+  /** 创建入群自动审批策略。group_openids 与 group_ids 必须二选一。 */
+  async createJoinApprovalStrategy (strategy = {}) {
+    this.validateJoinApprovalStrategyGroups(strategy)
+    const { data } = await this.sdk.request.post('/v2/groups/join_approval_strategy', strategy)
+    return data
+  }
+
+  /** 修改入群自动审批策略的状态、失效时间或关联群。 */
+  async updateJoinApprovalStrategy (strategyId, strategy = {}) {
+    const id = this.requireStrategyId(strategyId)
+    const { data } = await this.sdk.request.patch(
+      `/v2/groups/join_approval_strategy/${encodeURIComponent(id)}`,
+      strategy
+    )
+    return data ?? true
+  }
+
+  /** 删除入群自动审批策略。 */
+  async deleteJoinApprovalStrategy (strategyId) {
+    const id = this.requireStrategyId(strategyId)
+    const { data } = await this.sdk.request.delete(
+      `/v2/groups/join_approval_strategy/${encodeURIComponent(id)}`
+    )
+    return data ?? true
+  }
+
+  /** 执行策略，对关联群扫描并审批白名单成员的入群申请。 */
+  async executeJoinApprovalStrategy (strategyId) {
+    const id = this.requireStrategyId(strategyId)
+    const { data } = await this.sdk.request.post(
+      `/v2/groups/join_approval_strategy/${encodeURIComponent(id)}/execute`,
+      {}
+    )
+    return data ?? true
+  }
+
+  /** 批量新增或删除自动审批策略的 QQ 号白名单。 */
+  async updateJoinApprovalWhitelist (strategyId, op, users) {
+    const id = this.requireStrategyId(strategyId)
+    if (!['add', 'del'].includes(op)) throw new Error('QQBot 修改自动审批白名单失败：op 只能是 add 或 del')
+    if (!Array.isArray(users) || !users.length || users.length > 10000) {
+      throw new Error('QQBot 修改自动审批白名单失败：单次需提供 1 至 10000 个 QQ 号')
+    }
+    const whitelistUsers = users.map(user => String(user).trim())
+    if (whitelistUsers.some(user => !/^\d+$/.test(user))) {
+      throw new Error('QQBot 修改自动审批白名单失败：白名单成员必须是 QQ 号字符串')
+    }
+    const { data } = await this.sdk.request.post(
+      `/v2/groups/join_approval_strategy/${encodeURIComponent(id)}/whitelist_users`,
+      { op, whitelist_users: whitelistUsers }
+    )
+    return data
+  }
+
+  requireStrategyId (strategyId) {
+    const id = String(strategyId ?? '').trim()
+    if (!id) throw new Error('QQBot 入群自动审批策略操作失败：缺少 strategy_id')
+    return id
+  }
+
+  validateJoinApprovalStrategyGroups (strategy) {
+    const hasOpenids = Array.isArray(strategy.group_openids) && strategy.group_openids.length > 0
+    const hasGroupIds = Array.isArray(strategy.group_ids) && strategy.group_ids.length > 0
+    if (hasOpenids === hasGroupIds) {
+      throw new Error('QQBot 创建自动审批策略失败：group_openids 与 group_ids 必须二选一')
+    }
+    const groups = hasOpenids ? strategy.group_openids : strategy.group_ids
+    if (groups.length > 100) throw new Error('QQBot 创建自动审批策略失败：关联群最多 100 个')
   }
 
   /**

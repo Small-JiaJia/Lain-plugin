@@ -247,6 +247,10 @@ export default class QQSDK {
     if (!EventIndex.QQEvent.GROUP_MESSAGE_CREATE) {
       EventIndex.QQEvent.GROUP_MESSAGE_CREATE = 'message.group'
     }
+    /** 用户申请入群；旧版 SDK 尚未包含该事件映射。 */
+    if (!EventIndex.QQEvent.GROUP_JOIN_REQUEST) {
+      EventIndex.QQEvent.GROUP_JOIN_REQUEST = 'request.group.add'
+    }
     if (!EventIndex.EventParserMap.has('message.group')) {
       EventIndex.EventParserMap.set('message.group', EventIndex.EventParserMap.get(EventIndex.QQEvent.GROUP_AT_MESSAGE_CREATE))
     }
