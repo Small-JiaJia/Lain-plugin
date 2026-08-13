@@ -1,6 +1,8 @@
 import { exec } from 'child_process'
+import crypto from 'crypto'
 import fs from 'fs'
 import lodash from 'lodash'
+import fetch from 'node-fetch'
 import path from 'path'
 import moment from 'moment'
 import wasm from 'silk-wasm';
@@ -491,10 +493,7 @@ export default class adapterQQBot {
     return response.status === 200
   }
 
-  /**
-   * QQ 富媒体文件：先上传文件，再通过 msg_type=7 发送 file_info。
-   * https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/rich-media.html
-   */
+  /** QQ 富媒体文件：上传后通过 msg_type=7 发送 file_info。 */
   async uploadRichFile (targetType, targetId, file, name) {
     let upload = await this.resolveUploadFile(file, name)
     const sendUpload = async value => await this.sdk.request.post(`/v2/${targetType}s/${targetId}/files`, {
@@ -502,18 +501,24 @@ export default class adapterQQBot {
       // false 时只取得 file_info，随后由发送消息接口统一发送。
       srv_send_msg: false,
       file_name: value.name,
-      ...(value.fileData ? { file_data: value.fileData } : { url: value.url })
+      ...(value.buffer ? { file_data: value.buffer.toString('base64') } : { url: value.url })
     })
 
     let response
     try {
-      response = await sendUpload(upload)
+      // 官方群文件接口支持 URL 直传；本地文件和 URL 下载失败后的回退使用
+      // UploadPrepare → PUT 分片 → UploadPartFinish → /files 合并流程。
+      response = targetType === 'group' && upload.buffer
+        ? await this.uploadGroupFileInParts(targetId, upload)
+        : await sendUpload(upload)
     } catch (error) {
-      // 外部 URL 可能只能被机器人服务器访问，QQ 服务端下载失败（850011）时
-      // 尝试由本机下载后使用 file_data 直传。
-      if (!upload.fileData && this.isQQFileDownloadError(error)) {
+      // URL 直传在 QQ 服务端下载失败（850011）或内部代理失败（850012）时，
+      // 群文件改由本机下载并执行官方分片上传；私聊保留 file_data 回退。
+      if (!upload.buffer && this.isQQFileProxyError(error)) {
         upload = await this.resolveUploadFile(file, name, true)
-        response = await sendUpload(upload)
+        response = targetType === 'group'
+          ? await this.uploadGroupFileInParts(targetId, upload)
+          : await sendUpload(upload)
       } else {
         throw error
       }
@@ -522,6 +527,91 @@ export default class adapterQQBot {
     const { data } = response
     if (!data?.file_info) throw new Error('QQBot 文件上传失败：响应中没有 file_info')
     return { ...data, name: upload.name, url: upload.url }
+  }
+
+  /**
+   * 群文件官方分片上传。
+   * 1. /upload_prepare 申请 upload_id 和预签名 PUT 地址；
+   * 2. PUT 每个分片并调用 /upload_part_finish；
+   * 3. /files 携带 upload_id 完成合并并取得 file_info。
+   */
+  async uploadGroupFileInParts (groupId, upload) {
+    const buffer = upload.buffer
+    if (!Buffer.isBuffer(buffer)) throw new Error('QQBot 分片上传失败：缺少文件数据')
+    if (buffer.length > 200 * 1024 * 1024) throw new Error('QQBot 分片上传失败：文件超过 200MB 限制')
+
+    const md5 = data => crypto.createHash('md5').update(data).digest('hex')
+    const sha1 = data => crypto.createHash('sha1').update(data).digest('hex')
+    const { data: prepared } = await this.sdk.request.post(`/v2/groups/${groupId}/upload_prepare`, {
+      file_type: 4,
+      file_size: String(buffer.length),
+      file_name: upload.name,
+      md5: md5(buffer),
+      sha1: sha1(buffer),
+      // 官方定义为文件前 10002432 字节的 MD5。
+      md5_10m: md5(buffer.subarray(0, 10002432))
+    })
+
+    const uploadId = prepared?.upload_id
+    const blockSize = Number(prepared?.block_size)
+    const parts = Array.isArray(prepared?.parts) ? [...prepared.parts].sort((a, b) => Number(a.index) - Number(b.index)) : []
+    if (!uploadId || !parts.length || !Number.isFinite(blockSize) || blockSize <= 0) {
+      throw new Error('QQBot 分片上传失败：预上传响应缺少 upload_id、block_size 或 parts')
+    }
+
+    const uploadConfig = prepared.upload_config || {}
+    const retryTimeout = Math.max(1, Number(uploadConfig.retry_timeout) || 300) * 1000
+    const retryDelay = Math.max(1, Number(uploadConfig.retry_delay) || 1) * 1000
+    let offset = 0
+
+    for (const part of parts) {
+      const partSize = Math.min(Number(part.block_size) || blockSize, buffer.length - offset)
+      if (partSize <= 0 || !part.presigned_url) throw new Error('QQBot 分片上传失败：分片信息无效')
+      const chunk = buffer.subarray(offset, offset + partSize)
+      await this.putUploadPart(part.presigned_url, chunk, retryTimeout, retryDelay)
+      await this.sdk.request.post(`/v2/groups/${groupId}/upload_part_finish`, {
+        upload_id: uploadId,
+        part_index: Number(part.index),
+        block_size: String(chunk.length),
+        md5: md5(chunk)
+      })
+      offset += partSize
+    }
+
+    if (offset !== buffer.length) throw new Error('QQBot 分片上传失败：服务端返回的分片数量与文件大小不匹配')
+
+    return await this.sdk.request.post(`/v2/groups/${groupId}/files`, {
+      file_type: 4,
+      file_name: upload.name,
+      srv_send_msg: false,
+      upload_id: uploadId
+    })
+  }
+
+  /** 向 QQ 返回的预签名地址上传单个分片，并按 upload_config 重试。 */
+  async putUploadPart (url, chunk, retryTimeout, retryDelay) {
+    const deadline = Date.now() + retryTimeout
+    let error
+
+    do {
+      const controller = new AbortController()
+      const requestTimeout = Number(this.config.timeout) > 0 ? Number(this.config.timeout) : 60000
+      const timeout = setTimeout(() => controller.abort(), requestTimeout)
+      try {
+        const response = await fetch(url, { method: 'PUT', body: chunk, signal: controller.signal })
+        if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`)
+        return
+      } catch (err) {
+        error = err
+      } finally {
+        clearTimeout(timeout)
+      }
+
+      if (Date.now() + retryDelay > deadline) break
+      await common.sleep(retryDelay)
+    } while (Date.now() < deadline)
+
+    throw new Error(`QQBot 分片上传失败：${error?.message || error}`)
   }
 
   /** 发送 QQ 富媒体文件消息。sourceId 存在时按被动回复发送。 */
@@ -544,7 +634,7 @@ export default class adapterQQBot {
 
   /**
    * 兼容本地路径、base64、Buffer 与 URL。
-   * 本地内容使用官方 file_data Base64 直传，避免 QQ 服务端访问不到云崽内网地址。
+   * 群文件的本地内容会走官方分片上传；私聊维持 file_data Base64 直传。
    */
   async resolveUploadFile (file, name, preferFileData = false) {
     const source = file?.url || file?.file || file
@@ -557,14 +647,16 @@ export default class adapterQQBot {
       return { url: normalized, name: fileName }
     }
 
+    const data = await Bot.Buffer(normalized)
     return {
       name: fileName,
-      fileData: (await Bot.Buffer(normalized)).toString('base64')
+      buffer: Buffer.isBuffer(data) ? data : Buffer.from(data)
     }
   }
 
-  isQQFileDownloadError (error) {
-    return Number(error?.response?.data?.code) === 850011 || /code\(850011\)|download file error/i.test(String(error?.message || error))
+  isQQFileProxyError (error) {
+    const code = Number(error?.response?.data?.code)
+    return [850011, 850012].includes(code) || /code\(850011|850012\)|download file error|call inner proxy error/i.test(String(error?.message || error))
   }
 
   getUploadFileName (file) {
