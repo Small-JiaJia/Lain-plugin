@@ -73,6 +73,11 @@ async message (data) {
     if (handled) return
     await Bot.emit('message.group', e)
   } else {
+    const handled = await QQBotIdMap.handleQQPrivateMessage(e, async event => {
+      await Bot.emit('message.private', event)
+      await Bot.emit('message', event)
+    })
+    if (handled) return
     await Bot.emit('message.private', e)
   }
 
@@ -1560,7 +1565,6 @@ Bot.on('message', async (e) => {
       e.file.name = e.file.file;
   }
 })
-
 
 
 

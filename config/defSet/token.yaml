@@ -5,6 +5,7 @@ default:
     appid: "default"                    # 开发者ip
     sandbox: false                        # 沙盒  true-开启  false-关闭
     allMsg: true                          # QQ频道接收全部消息  true-私域  false-公域
+    groupAllMsg: false                    # QQ群订阅全量群消息；默认只接收 @ 机器人消息
     token:                                # 机器人令牌
     secret:                               # 机器人密钥
     maxRetry: 10                          # 重连次数

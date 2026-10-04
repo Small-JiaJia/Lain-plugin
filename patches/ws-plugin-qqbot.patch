@@ -1,0 +1,158 @@
+diff --git a/model/api.js b/model/api.js
+index 3879f57..bf467bb 100644
+--- a/model/api.js
++++ b/model/api.js
+@@ -126,13 +126,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+     send_private_msg: async (params) => {
+       let { sendMsg, quote } = await makeSendMsg(params, uin, adapter)
+       if (sendMsg.length == 0) return
+-      if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-        const msg = getLatestMsg(params.user_id)
+-        if (msg) {
+-          await msg.reply(sendMsg)
+-          return
+-        }
+-      }
++      // OneBot 的 send_private_msg 是面向指定用户的主动发送 API。
++      // 不能根据缓存的最近消息擅自转换，否则会错用被动回复窗口。
+       sendRet = await bot.pickFriend?.(params.user_id).sendMsg?.(sendMsg, quote)
+       logger.info(`[ws-plugin] 连接名字:${name} 处理完成`)
+     },
+@@ -140,13 +135,7 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+     send_group_msg: async (params) => {
+       let { sendMsg, quote } = await makeSendMsg(params, uin, adapter)
+       if (sendMsg.length == 0) return
+-      if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-        const msg = getLatestMsg(params.group_id)
+-        if (msg) {
+-          await msg.reply(sendMsg)
+-          return
+-        }
+-      }
++      // 同 send_private_msg：普通发送默认使用主动发送接口。
+       sendRet = await bot.pickGroup?.(params.group_id).sendMsg?.(sendMsg, quote)
+       logger.info(`[ws-plugin] 连接名字:${name} 处理完成`)
+     },
+@@ -155,22 +144,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+       let { sendMsg, quote } = await makeSendMsg(params, uin, adapter)
+       if (sendMsg.length == 0) return
+       if (params.message_type == 'group' || params.group_id) {
+-        if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-          const msg = getLatestMsg(params.group_id)
+-          if (msg) {
+-            await msg.reply(sendMsg)
+-            return
+-          }
+-        }
+         sendRet = await bot.pickGroup?.(params.group_id).sendMsg?.(sendMsg, quote)
+       } else if (params.message_type == 'private' || params.user_id) {
+-        if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-          const msg = getLatestMsg(params.user_id)
+-          if (msg) {
+-            await msg.reply(sendMsg)
+-            return
+-          }
+-        }
+         sendRet = await bot.pickFriend?.(params.user_id).sendMsg?.(sendMsg, quote)
+       }
+       logger.info(`[ws-plugin] 连接名字:${name} 处理完成`)
+@@ -267,22 +242,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+         if (match) forward_id = match[1]
+       }
+       if (params.group_id) {
+-        if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-          const msg = getLatestMsg(params.group_id)
+-          if (msg) {
+-            await msg.reply(forwardMsg)
+-            return
+-          }
+-        }
+         sendRet = await bot.pickGroup(params.group_id).sendMsg(forwardMsg)
+       } else if (params.user_id) {
+-        if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-          const msg = getLatestMsg(params.user_id)
+-          if (msg) {
+-            await msg.reply(forwardMsg)
+-            return
+-          }
+-        }
+         sendRet = await bot.pickFriend(params.user_id).sendMsg(forwardMsg)
+       }
+       if (sendRet && forward_id) {
+@@ -301,13 +262,6 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+         let match = forwardMsg.data?.match(/m_resid="(.*?)"/)
+         if (match) forward_id = match[1]
+       }
+-      if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-        const msg = getLatestMsg(params.group_id)
+-        if (msg) {
+-          await msg.reply(forwardMsg)
+-          return
+-        }
+-      }
+       sendRet = await bot.pickGroup(params.group_id).sendMsg(forwardMsg)
+       if (sendRet && forward_id) {
+         sendRet.forward_id = forward_id
+@@ -325,13 +279,6 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+         let match = forwardMsg.data.match(/m_resid="(.*?)"/)
+         if (match) forward_id = match[1]
+       }
+-      if (adapter?.name == 'QQBot' || adapter?.name == 'QQGuild') {
+-        const msg = getLatestMsg(params.user_id)
+-        if (msg) {
+-          await msg.reply(forwardMsg)
+-          return
+-        }
+-      }
+       sendRet = await bot.pickFriend(params.user_id).sendMsg(forwardMsg)
+       if (sendRet && forward_id) {
+         sendRet.forward_id = forward_id
+@@ -1100,6 +1047,13 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+   api = api?.replace(/_async$/, '')
+   if (typeof publicApi[api] === 'function') {
+     await publicApi[api](params)
++    /**
++     * 部分适配器（特别是媒体消息）成功后不返回消息对象。OneBot 11 的发送
++     * API 仍应返回 data.message_id，避免调用方将 data: null 误判为失败。
++     */
++    if (!sendRet && ['send_private_msg', 'send_group_msg', 'send_msg'].includes(api)) {
++      sendRet = {}
++    }
+     if (sendRet) {
+       switch (adapter?.name) {
+         case 'QQ频道Bot':
+diff --git a/model/makeMsg.js b/model/makeMsg.js
+index efcf5b0..b176b83 100644
+--- a/model/makeMsg.js
++++ b/model/makeMsg.js
+@@ -322,6 +322,13 @@ async function makeSendMsg (params, uin, adapter) {
+       case 'image':
+         sendMsg.push(segment.image(i.data.file))
+         break
++      case 'file':
++        sendMsg.push({
++          type: 'file',
++          file: i.data.file,
++          name: i.data.name
++        })
++        break
+       case 'text':
+         sendMsg.push(decodeHtml(i.data.text))
+         break
+@@ -567,6 +574,16 @@ async function msgToOneBotMsg (msg, e) {
+           }
+         })
+         break
++      case 'file':
++        reportMsg.push({
++          type: 'file',
++          data: {
++            file: i.file || i.url,
++            name: i.name,
++            size: i.size
++          }
++        })
++        break
+       default:
+         break
+     }

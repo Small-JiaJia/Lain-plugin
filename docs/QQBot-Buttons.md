@@ -1,504 +1,191 @@
-# QQBot 按钮消息使用文档
+# QQBot 底部按钮：使用与开发
 
-> 严格遵循 [QQ 官方按钮消息文档](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/msg-btn.html)
+Lain-plugin 为 QQBot 提供原生 `keyboard` 按钮消息。按钮可以发送指令、触发回调或打开网页；扩展按钮可在插件回复时自动附加到底部。按钮消息遵循 [QQ 机器人官方按钮文档](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/msg-btn.html)。
 
-## 官方消息格式
+## 使用现成按钮
 
-按钮消息以 `keyboard` 类型发送，与 `markdown` 同属 `msg_type: 2`：
+QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的按钮扩展。消息匹配某个扩展文件的规则后，适配器将该文件返回的按钮附加到回复底部。
 
-```json
-{
-  "msg_type": 2,
-  "markdown": { "content": "消息正文" },
-  "keyboard": {
-    "content": {
-      "rows": [
-        {
-          "buttons": [
-            {
-              "id": "bt_xxx",
-              "render_data": {
-                "label": "按钮文本",
-                "visited_label": "点击后文本",
-                "style": 0
-              },
-              "action": {
-                "type": 1,
-                "permission": { "type": 2 },
-                "data": "回调数据",
-                "enter": false,
-                "unsupport_tips": "暂不支持此按钮"
-              }
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
-```
+按钮点击后有三种动作：
 
-## 按钮 action.type
+| 动作 | 简写 | 点击后的行为 |
+| --- | --- | --- |
+| 输入 | `data` 或 `input` | 把文本放入当前会话输入框；`send: true` 时直接发送 |
+| 回调 | `callback` | 触发 QQBot `interaction` 回调，再作为消息交给 YunZai 插件 |
+| 链接 | `link` | 打开 HTTP/HTTPS 网页 |
 
-| type | 说明 | data 字段 | enter 字段 |
-|------|------|-----------|------------|
-| 0 | 链接跳转 | URL 地址 | `false` |
-| 1 | 回调（触发 interaction 事件） | 自定义回调数据 | `false` |
-| 2 | 输入（直接发送文本） | 要发送的文本 | `true`=自动发送 |
+`data` 默认作为输入按钮发送，适合执行 YunZai 指令。按钮行最多 5 个按钮，键盘最多 5 行。官方指令按钮（`action.type=2`）会自动插入 `@bot`；当群状态接口返回 `recv_msg_setting=all` 时，适配器会将群内指令按钮改为回调按钮，让点击直接交给插件执行而不插入 `@bot`。其他接收类型保留官方指令按钮行为。回调按钮会生成唯一 ID，并保留原消息所在群。
 
-## 按钮 permission.type
+## 在插件代码中添加按钮
 
-| type | 说明 |
-|------|------|
-| 0 | 指定用户（需配合 `specify_user_ids`） |
-| 1 | 仅管理员 |
-| 2 | 所有人（默认） |
-
-## style
-
-| 值 | 颜色 |
-|----|------|
-| 0 | 灰色 |
-| 1 | 蓝色（默认） |
-
-## 使用方式
-
-### 方式一：Bot.Button 全局函数
-
-适用于所有适配器，返回 `[{ type: 'button', buttons: [...] }]` 格式行数组。
+### `Bot.Button()`
 
 ```js
-const buttons = Bot.Button([
-  { label: '功能统计', data: '#功能统计' },     // type 2: 输入按钮
-  { label: '百度', link: 'https://baidu.com' }, // type 0: 链接按钮
-  { label: '回调', callback: '/mycmd' },        // type 1: 回调按钮
-], 3)  // 每行最多 3 个按钮
-
-// 二维数组控制行分组
-const buttons = Bot.Button([
-  [
-    { label: '按钮A', data: '/a' },
-    { label: '按钮B', data: '/b' },
-  ],
-  [
-    { label: '按钮C', link: 'https://example.com' },
-  ]
+await e.reply([
+  '请选择操作：',
+  ...Bot.Button([
+    { label: '签到', data: '#签到' },
+    { label: '帮助', data: '#帮助' },
+    { label: '项目主页', link: 'https://example.com' }
+  ])
 ])
 ```
 
-### 方式二：e.markdown / e.replyMarkdown
-
-QQBot 适配器专用，发送 markdown + 按钮：
+也可以用二维数组明确指定行：
 
 ```js
-// 基本用法
-await e.markdown('消息正文', { buttons: [[{ label: '按钮', data: '/cmd' }]] })
-
-// 二维按钮数组
-const buttons = [
-  [
-    { label: '签到', data: '/签到' },
-    { label: '帮助', data: '/帮助' },
-  ]
-]
-await e.markdown('欢迎使用', { buttons })
-```
-
-### 方式三：直接回复
-
-```js
-await this.reply([
-  { type: 'markdown', content: '消息正文' },
-  {
-    type: 'keyboard',
-    content: {
-      rows: [
-        {
-          buttons: [
-            {
-              id: 'bt_001',
-              render_data: { label: '按钮', visited_label: '已点击', style: 1 },
-              action: { type: 1, permission: { type: 2 }, data: '/cmd', enter: false, unsupport_tips: '不支持' }
-            }
-          ]
-        }
-      ]
-    }
-  }
-])
-```
-
-### 方式四：22009-plugin Button 插件
-
-在 `lain.support.js` 中定义按钮插件，自动为匹配的消息添加按钮行：
-
-```js
-export default class Button {
-  constructor() {
-    this.plugin = {
-      name: '我的按钮',
-      dsc: '按钮描述',
-      priority: 100,
-      rule: [
-        { reg: '^#?菜单$', fnc: 'menu' }
-      ]
-    }
-  }
-
-  menu(e) {
-    const button = [
-      [
-        { label: '功能A', data: '/功能A' },
-        { label: '功能B', data: '/功能B' },
-      ],
-      [
-        { label: '官网', link: 'https://example.com' },
-      ]
+await e.reply([
+  '常用功能',
+  ...Bot.Button([
+    [
+      { label: '体力', data: '#原神体力' },
+      { label: '面板', data: '#角色面板帮助' }
+    ],
+    [
+      { label: '帮助', data: '#喵喵帮助' }
     ]
-    return Bot.Button(button)
-  }
-}
+  ])
+])
 ```
 
-## 按钮字段映射
-
-`Bot.Button` 接受的简写字段与官方字段的对应关系：
-
-| 简写字段 | 官方字段 | 说明 |
-|----------|----------|------|
-| `label` / `text` | `render_data.label` | 按钮显示文本 |
-| `visited_label` | `render_data.visited_label` | 点击后的文本 |
-| `style` | `render_data.style` | 0=灰色, 1=蓝色 |
-| `link` | `action.type=0`, `action.data` | 链接 URL |
-| `callback` | `action.type=1`, `action.data` | 回调数据 |
-| `data` | `action.data` | 自定义数据（无 link/callback/input 时） |
-| `input` | `action.type=2`, `action.data` | 输入文本 |
-| `send` / `enter` | `action.enter` | 是否自动发送 |
-| `admin` | `permission.type=1` | 仅管理员可点 |
-| `list` | `permission.type=0`, `specify_user_ids` | 指定用户可点 |
-| `tips` | `action.unsupport_tips` | 不支持时的提示 |
-
-## 回调按钮交互
-
-当用户点击 `type=1`（callback）按钮时，机器人收到 `interaction` 事件。adapter 自动将其转为 `message` 事件：
+### `e.markdown()`
 
 ```js
-// 监听按钮回调
-e.cmd = e.raw_message  // 回调数据
-e.sub_type === 'callback'  // 标识为按钮回调
+await e.markdown('# 今日状态\n请选择下一步：', {
+  buttons: [[
+    { label: '刷新', data: '#刷新状态' },
+    { label: '帮助', data: '#帮助' }
+  ]]
+})
 ```
 
-`toCallback` 配置项控制 callback 按钮的发送方式：
-- `true`（默认）：type=1，触发 interaction 事件
-- `false`：转为 type=2（输入），自动发送回调数据
+`buttons` 或 `button` 已经提供按钮时，适配器不会再自动附加另一组规则按钮，避免重复。按钮字段也可使用 `text` 替代 `label`，使用 `visited_label` 设置点击后的显示文字，使用 `style: 0|1` 指定灰色或蓝色样式。
 
-## 约束
-
-- 每行最多 **5** 个按钮
-- 最多 **5** 行按钮
-- 按钮 `id` 自动生成，无需手动指定
-- `permission.specify_user_ids` 中的 ID 会自动剥离 `appid-` 前缀
-
-## 自动附加按钮（插件无需改动）
-
-QQBot adapter 内置了按钮自动附加机制。当任何插件调用 `e.reply()` 或 `e.markdown()` 时，adapter 会自动扫描已注册的 button 插件（`lain.support.js`），匹配当前消息并附加按钮。
-
-### 工作原理
-
-```
-插件调用 e.reply('消息')
-  → adapter 包装函数触发
-  → 调用 this.button(e) 扫描所有 button 插件
-  → 匹配 e.msg 的规则返回按钮行
-  → 按钮自动追加到消息
-  → 发送 [消息, keyboard]
-```
-
-### 如何注册按钮规则
-
-在任意插件目录创建 `lain.support.js`：
+权限字段：
 
 ```js
-export default class Button {
-  constructor() {
-    this.plugin = {
-      name: '我的按钮',
-      dsc: '描述',
-      priority: 100,  // 越小越先匹配
-      rule: [
-        { reg: '^#?菜单$', fnc: 'menu' },       // 精确匹配
-        { reg: '', fnc: 'always' },               // 空字符串 = 全局匹配
-      ]
-    }
-  }
-
-  menu(e) {
-    return Bot.Button([
-      [{ label: '功能A', data: '/功能A' }],
-      [{ label: '帮助', data: '/帮助' }],
-    ])
-  }
-
-  always(e) {
-    // 返回 false 或不返回 = 不附加按钮
-    return false
-  }
-}
+{ label: '管理员操作', data: '#管理操作', admin: true }
+{ label: '指定用户', data: '#用户操作', list: ['用户 OpenID'] }
 ```
 
-### 注意事项
+`admin: true` 将按钮限制给管理员；`list` 只允许列表中的用户点击。官方权限仍受 QQ 平台和机器人权限配置约束。
 
-- 只有 `e.adapter === 'QQBot'` 时才触发自动附加
-- `e.markdown(msg, { buttons })` 已手动传入 buttons 时不会重复附加
-- `quote?.markdown` 模式不触发自动附加（走 `sendMarkdownReplyMsg` 专用路径）
-- 多个 button 插件按 `priority` 排序，只取第一个匹配结果
-- 自动附加通过 `this.button(e)` 实现，与 `e.markdown` 内置的 button 扫描共用同一套插件系统
+## mqqapi 内联命令
 
-## plugins/button/ 目录
-
-Lain 的按钮插件目录。放入此目录的 `.js` 文件会被 QQBot adapter 自动加载，支持热更新。
-
-### 文件结构
-
-```
-plugins/button/
-  菜单按钮.js      ← 匹配 #菜单 时附加导航按钮
-  全局按钮.js      ← 匹配所有消息的兜底按钮
-  你的按钮.js      ← 自定义按钮插件
-  lain.support.js  ← 传统格式（兼容）
-```
-
-### 创建按钮插件
-
-每个 `.js` 文件导出一个 class，结构如下：
+Markdown 中的 `mqqapi://aio/inlinecmd` 链接会自动转换成 QQBot 原生输入按钮。点击时在当前会话发送 `command` 的内容，不会把自定义协议作为第三方应用外链打开。
 
 ```js
-export default class MyButton {
+await e.markdown(
+  '[设置免艾特](mqqapi://aio/inlinecmd?command=权限设置&reply=false&enter=true)'
+)
+```
+
+适配器会显示“设置免艾特”作为按钮文字，并将 `权限设置` 作为输入内容。`enter=true` 表示点击后立即发送；`enter=false` 表示先填入输入框。链接可带 URL 编码后的中文，`&` 查询参数也可以按 Markdown 原样书写。
+
+`Bot.Button()` 和自定义扩展文件中的 `link` 如果填写同类 mqqapi 链接，也会转换成输入按钮。普通 HTTP/HTTPS 链接仍作为网页按钮发送。
+
+官方群消息接口标注 `enter` 和 `reply` 的新客户端自动发送选项仅支持单聊；群内按钮以客户端实际行为为准。群全量模式使用回调，因此无需依赖群内 `enter` 自动发送。
+
+## 回调按钮测试
+
+回调示例已整理为独立的 `plugins/button/archive-+1.js`，配套消息命令在 `apps/qqbot_button_test.js`。向 QQBot 发送 `#回调按钮测试`，回复底部应出现“测试回调 +1”；点击后应收到“回调按钮测试成功”。该示例在群聊和私聊都可用。群全量模式下，点击不会把机器人自己的 @ 段传给插件。
+
+原始归档中的组件已按上游插件合并到仓库的 `plugins/button/`：喵喵、逍遥、绝区零、星铁、椰奶、原神、铃音和鸣潮各使用一个顶层扩展文件。同一文件内的原规则仍保留各自的优先级；没有重复归属的示例继续作为独立 `archive-*.js` 文件。原始压缩包无需下载或放入插件目录。缺少 `requiredPlugin` 指定的插件时跳过加载。含静态导入的扩展在文件首行使用 `// @requiredPlugin <目录名>`，以便加载器在导入前检查依赖。
+
+## 创建自定义底部按钮文件
+
+### 1. 创建文件
+
+在 Miao-Yunzai 的 Lain-plugin 目录下创建 `plugins/button`（没有时自行新建），并在该目录顶层新建一个 `.js` 文件。目录首次新建后重启 YunZai，再添加、修改或删除按钮文件时会热更新。目录示例：
+
+```text
+Miao-Yunzai/
+└── plugins/
+    └── Lain-plugin/
+        └── plugins/
+            └── button/
+                └── miao-plugin.js
+```
+
+加载器会读取该目录顶层的 `.js` 文件，并监听新增、修改和删除事件以热更新。文件必须默认导出一个构造函数。
+
+### 2. 填写插件规则和按钮方法
+
+下面的例子为 `miao-plugin` 的帮助回复增加操作按钮：
+
+```js
+export default class MiaoButtons {
   constructor () {
     this.plugin = {
-      name: '插件名',          // 显示名称
-      dsc: '描述',              // 功能描述
-      priority: 100,            // 优先级，数字越小越先匹配
+      name: '喵喵插件按钮',
+      dsc: '为喵喵帮助回复添加快捷入口',
+      requiredPlugin: 'miao-plugin',
+      priority: 100,
       rule: [
         {
-          reg: '^#?菜单$',      // 匹配的正则
-          fnc: 'onMenu'         // 匹配后调用的方法名
-        },
-        {
-          reg: '',              // 空字符串 = 匹配所有消息
-          fnc: 'onAll'
+          reg: '^#喵喵帮助$',
+          fnc: 'help'
         }
       ]
     }
   }
 
-  onMenu (e) {
-    // 返回 Bot.Button(...) 格式的按钮行
+  help (e) {
     return Bot.Button([
-      [{ label: '功能A', data: '#功能A' }],
-      [{ label: '帮助', data: '#帮助' }],
-    ])
-  }
-
-  onAll (e) {
-    // 返回 false 或不返回 = 不附加按钮
-    if (!e.group_id) return false
-    return Bot.Button([[{ label: '菜单', data: '#菜单' }]])
-  }
-}
-```
-
-### 匹配规则
-
-- `reg: '^#?菜单$'` — 精确匹配
-- `reg: '关键词'` — 包含匹配
-- `reg: ''` — 匹配所有消息（注意设低优先级 priority 值大）
-- 多个插件按 `priority` 排序，**只取第一个匹配结果**
-
-### 与 lain.support.js 的关系
-
-`plugins/button/lain.support.js` 是传统格式，与 `plugins/button/*.js` 同时生效。
-如果两者都匹配同一消息，按 `priority` 决定优先级。
-
-### 热更新
-
-修改 `plugins/button/` 下的 `.js` 文件后自动重新加载，无需重启。
-日志中会显示 `[Lain-plugin][修改按钮插件][...]`。
-
-## miao-plugin Button API 兼容
-
-支持 `Bot.Button.create()` 和 `Bot.Button.nav()` 两种创建方式，与 miao-plugin 的 Button API 对齐。
-
-### Bot.Button.create(rows)
-
-从二维数组创建按钮：
-
-```js
-// 二维数组，每个子数组是一行
-let btn = Bot.Button.create([
-  [{ text: '签到', data: '#签到' }, { text: '帮助', data: '#帮助' }],
-  [{ text: '官网', link: 'https://example.com' }]
-])
-await e.reply([msg, btn])
-```
-
-### Bot.Button.nav(items)
-
-创建导航按钮（单行）：
-
-```js
-let nav = Bot.Button.nav([
-  { text: '上一页', data: '#上一页' },
-  { text: '下一页', data: '#下一页' }
-])
-await e.reply([msg, nav])
-```
-
-### Bot.Button.isButton(obj)
-
-判断对象是否为 Button.create() 生成的按钮：
-
-```js
-if (Bot.Button.isButton(someObj)) { ... }
-```
-
-### Bot.Button.extract(msg)
-
-从消息数组中分离按钮对象：
-
-```js
-const { msgs, button } = Bot.Button.extract([text, image, btnObj])
-// msgs = [text, image]
-// button = btnObj (或 null)
-```
-
-### 按钮字段
-
-| 字段 | 说明 | 默认值 |
-|------|------|--------|
-| `text` | 按钮文本 | 必填 |
-| `data` | 回调/输入数据 | |
-| `link` | 跳转链接（type=0） | |
-| `callback` | 回调数据（type=1） | |
-| `input` | 输入数据（type=2） | |
-| `send` / `enter` | 是否自动发送 | type=2 默认 true |
-| `style` | 0=灰色, 1=蓝色 | 行内交替 |
-| `admin` | 仅管理员可点 | false |
-| `list` | 指定用户 openid 列表 | |
-| `tips` | 不支持时的提示 | |
-
-### 在 button 插件中使用
-
-```js
-export default class MyButton {
-  constructor() {
-    this.plugin = {
-      name: '我的按钮',
-      dsc: '描述',
-      priority: 100,
-      rule: [{ reg: '#命令', fnc: 'cmd' }]
-    }
-  }
-
-  // 方式一：Bot.Button() 函数（原生）
-  cmd_old(e) {
-    return Bot.Button([[{ label: '按钮', data: '#cmd' }]])
-  }
-
-  // 方式二：Bot.Button.create()（miao 风格）
-  cmd(e) {
-    return Bot.Button.create([
-      [{ text: '按钮A', data: '#cmd' }],
-      [{ text: '按钮B', link: 'https://...' }]
-    ])
-  }
-
-  // 方式三：Bot.Button.nav()（导航行）
-  cmd_nav(e) {
-    return Bot.Button.nav([
-      { text: '上一页', data: '#prev' },
-      { text: '下一页', data: '#next' }
+      [
+        { label: '角色面板帮助', data: '#角色面板帮助' },
+        { label: '更新面板', data: '#更新面板' }
+      ],
+      [
+        { label: '喵喵版本', data: '#喵喵版本' }
+      ]
     ])
   }
 }
 ```
 
-### 在插件 reply 中直接使用
+规则中的 `reg` 匹配当前事件的 `e.msg`，`fnc` 指向同一类中的方法。方法返回 `Bot.Button(...)` 后，适配器会将按钮附加在当前回复底部。返回 `false` 或空值时不附加按钮，后续优先级规则仍可继续匹配。
+
+### 3. 只在对应插件存在时加载
+
+为插件专属按钮声明 `requiredPlugin`：
 
 ```js
-// 插件代码中
-async myFunc(e) {
-  let nav = Bot.Button.nav([
-    { text: '重试', data: '#重试' },
-    { text: '帮助', data: '#帮助' }
-  ])
-  await e.reply(['操作完成', nav])
-}
+requiredPlugin: 'miao-plugin'
 ```
 
-`e.reply()` 会自动识别消息数组中的 Button 对象并转换为 keyboard 格式发送。
+适配器会检查 `Miao-Yunzai/plugins/miao-plugin` 目录。插件目录不存在时跳过这个按钮文件；该字段也可以是目录名数组。安装了插件后重启 YunZai，或重新保存按钮文件触发加载。
 
-## segment.button() 兼容（miao-plugin 原生风格）
+不依赖外部插件的自定义按钮可以省略 `requiredPlugin`。路径填写 Yunzai `plugins` 目录下的插件目录名，不要填写 `Lain-plugin/plugins/button`。
 
-在 `segment` 全局对象上提供了 `button()` 方法，直接兼容 miao-plugin 的 Button.js 写法。
+### 4. 设置匹配优先级
 
-### API
+适配器按规则优先级从小到大检查，优先读取 `rule.priority`，未设置时使用所在按钮文件的 `plugin.priority`。第一个匹配并返回按钮的规则会提供这次回复的按钮；如果方法返回 `false` 或空值，则继续检查后面的规则。全局兜底规则应使用较大的优先级数值，并在方法中判断是否需要显示。
 
-```js
-segment.button(row1, row2, row3, ...)
-```
+## 按钮字段参考
 
-每个参数是一行按钮数组，行结构完整保留。
+| 字段 | 用途 |
+| --- | --- |
+| `label` / `text` | 按钮显示文字 |
+| `data` / `input` | 输入到当前会话的文本 |
+| `send` / `enter` | 是否点击后立即发送输入文本 |
+| `callback` | 回调按钮的数据，触发 interaction 事件 |
+| `link` | HTTP/HTTPS 网页地址；mqqapi inlinecmd 会转为输入按钮 |
+| `style` | `0` 灰色、`1` 蓝色 |
+| `visited_label` / `clicked_text` | 点击后的按钮文字 |
+| `admin` | 仅管理员可点击 |
+| `list` / `permission` | 限制可点击的用户 |
+| `tips` / `unsupport_tips` | 客户端不支持时显示的提示 |
 
-### miao-plugin Button.js 完整兼容示例
+## 插件包内的按钮文件
 
-```js
-export default class Button {
-  constructor(e = {}) {
-    this.prefix = e.isSr ? "*" : "#"
-  }
+也可以在插件包顶层使用 `lain.support.js` 导出同样的按钮类。此方式适合插件作者把扩展和自己的插件一起发布。个人配置或跨插件快捷入口建议放在 `plugins/button/<文件名>.js`，并用 `requiredPlugin` 声明目标插件。两种来源使用同一套 `plugin.rule` 和按钮构造方式。
 
-  gacha() {
-    return segment.button(
-      [{ text: "角色记录", callback: `${this.prefix}角色记录` },
-       { text: "角色统计", callback: `${this.prefix}角色统计` }],
-      [{ text: "武器记录", callback: `${this.prefix}武器记录` },
-       { text: "武器统计", callback: `${this.prefix}武器统计` }],
-      [{ text: "抽卡帮助", callback: `${this.prefix}抽卡帮助` }]
-    )
-  }
+## 排查
 
-  profile(char = {}, uid = "") {
-    return segment.button(
-      [{ text: `${char.name}卡片`, callback: `${this.prefix}${char.name}卡片${uid}` },
-       { text: `${char.name}面板`, callback: `${this.prefix}${char.name}面板${uid}` }],
-      [{ text: `${char.name}排行`, callback: `${this.prefix}${char.name}排行` },
-       { text: `${char.name}图鉴`, callback: `${this.prefix}${char.name}图鉴` }]
-    )
-  }
-
-  // 动态行数也完全支持
-  profileList(uid = "", charList = {}) {
-    const button = [[]]
-    let count = 0
-    for (const name in charList) {
-      if (count >= 10) break
-      const array = button[button.length - 1]
-      array.push({ text: `${name}面板`, callback: `${this.prefix}${name}面板${uid}` })
-      if (array.length > 1) button.push([])
-      count++
-    }
-    return segment.button(...button)
-  }
-}
-```
-
-### 三种 API 对照
-
-| API | 风格 | 用法 |
-|-----|------|------|
-| `Bot.Button(list, line)` | Lain 原生 | `Bot.Button([{ label, data }], 3)` |
-| `Bot.Button.create(rows)` | miao 风格（静态） | `Bot.Button.create([[{ text, data }]])` |
-| `segment.button(...rows)` | miao 原生 | `segment.button([{ text, data }], [{ text, data }])` |
-
-三种方式输出格式一致，adapter 统一处理。
+- QQBot 来源消息的 `e.reply()`、`e.markdown()` 都会检查自动按钮。启用 ICQQ 身份转译后，即使 `e.adapter` 显示兼容适配器名称，回复仍由 QQBot 发送并保留按钮。
+- 回复中已经提供 `keyboard` 或 `button` 时，不再叠加规则按钮；`e.reply(msg, { markdown: true })` 也支持自动按钮。
+- 检查 `rule.reg` 是否匹配当前 `e.msg`，以及 `fnc` 方法是否返回按钮。
+- 检查目标插件的目录名是否与 `requiredPlugin` 完全相同。
+- 只有顶层 `.js` 文件会被 `plugins/button` 加载；文件放在子目录时不会自动递归读取。
+- 点击后无响应时，确认按钮是输入动作且 `data` 是插件可识别的指令；回调动作则检查 QQBot interaction 事件权限。

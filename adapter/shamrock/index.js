@@ -65,6 +65,7 @@ class Shamrock {
     /** 转置消息后给喵崽 */
     const e = await this.ICQQEvent(data)
     if (await QQBotIdMap.handleQQGroupMessage(e, async event => await Bot.emit('message', event))) return
+    if (await QQBotIdMap.handleQQPrivateMessage(e, async event => await Bot.emit('message', event))) return
     await Bot.emit('message', e)
   }
 

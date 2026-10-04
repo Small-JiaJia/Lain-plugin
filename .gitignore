@@ -54,6 +54,7 @@ coverage/
 .cache/
 
 *.tar.gz
+button.zip
 .22009-plugin/
 .ws-plugin/
 Milky.js

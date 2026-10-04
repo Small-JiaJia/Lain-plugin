@@ -19,6 +19,13 @@ class Button {
     filePath = filePath.replace(/\\/g, '/')
     try {
       const absPath = path.resolve(pluginRoot, filePath)
+      // 含静态 import 的扩展必须先检查依赖，否则缺插件时 import 已经报错。
+      const header = fs.readFileSync(absPath, 'utf8').slice(0, 2048)
+      const required = header.match(/^\/\/ @requiredPlugin ([\w-]+)$/m)?.[1]
+      if (required && !this.isPluginInstalled(required)) {
+        logger.debug(`按钮模块 ${filePath} 依赖的插件未安装，跳过加载：${required}`)
+        return
+      }
       const fileUrl = pathToFileURL(absPath)
       fileUrl.searchParams.set('t', String(Date.now()) + Math.random().toString(36).slice(2))
       const mod = await import(fileUrl.href)
@@ -28,13 +35,45 @@ class Button {
         return
       }
       const instance = new PluginClass()
+      if (!instance.plugin || !Array.isArray(instance.plugin.rule) || !Number.isFinite(Number(instance.plugin.priority))) {
+        logger.error(`按钮模块 ${filePath} 格式错误：需要 plugin.rule 数组和数字 priority`)
+        return
+      }
+      for (const rule of instance.plugin.rule) {
+        if (!rule || typeof instance[rule.fnc] !== 'function') {
+          logger.error(`按钮模块 ${filePath} 格式错误：规则 fnc 没有对应方法`)
+          return
+        }
+      }
+      const requiredPlugins = instance.plugin?.requiredPlugin
+        ? (Array.isArray(instance.plugin.requiredPlugin) ? instance.plugin.requiredPlugin : [instance.plugin.requiredPlugin])
+        : []
+      const missingPlugins = requiredPlugins.filter(pluginName => !this.isPluginInstalled(pluginName))
+      if (missingPlugins.length) {
+        logger.debug(`按钮模块 ${filePath} 依赖的插件未安装，跳过加载：${missingPlugins.join(', ')}`)
+        return
+      }
       instance.plugin._path = filePath
       this.botModules.push(instance)
       /** 排序 */
       this.botModules.sort((a, b) => a.plugin.priority - b.plugin.priority)
       logger.debug(`按钮模块 ${filePath} 已加载。`)
+      return true
     } catch (error) {
       logger.error(`导入按钮模块 ${filePath} 时出错：${error.message}`)
+    }
+  }
+
+  /** 检查 Yunzai/plugins 下的可选按钮依赖是否存在。 */
+  isPluginInstalled (pluginName) {
+    if (typeof pluginName !== 'string' || !pluginName.trim()) return false
+    const yunzaiPluginRoot = path.resolve(pluginRoot, '..')
+    const pluginPath = path.resolve(yunzaiPluginRoot, pluginName)
+    if (!pluginPath.startsWith(yunzaiPluginRoot + path.sep)) return false
+    try {
+      return fs.statSync(pluginPath).isDirectory()
+    } catch {
+      return false
     }
   }
 
@@ -56,12 +95,11 @@ class Button {
     if (filePath.endsWith('.js')) {
       if (eventType === 'add') {
         this.unloadModule(filePath)
-        await this.loadModule(filePath)
-        if (!state) logger.mark(`[Lain-plugin][新增按钮插件][${filePath}]`)
+        const loaded = await this.loadModule(filePath)
+        if (!state && loaded) logger.mark(`[Lain-plugin][新增按钮插件][${filePath}]`)
       } else if (eventType === 'change') {
         this.unloadModule(filePath)
-        await this.loadModule(filePath)
-        logger.mark(`[Lain-plugin][修改按钮插件][${filePath}]`)
+        if (await this.loadModule(filePath)) logger.mark(`[Lain-plugin][修改按钮插件][${filePath}]`)
       } else if (eventType === 'unlink') {
         this.unloadModule(filePath)
         logger.mark(`[Lain-plugin][卸载按钮插件][${filePath}]`)
@@ -106,8 +144,7 @@ class Button {
         for (const file of btnFiles) {
           const relPath = 'plugins/button/' + file
           this.unloadModule(relPath)
-          await this.loadModule(relPath)
-          logger.mark(`[Lain-plugin][加载按钮插件][${relPath}]`)
+          if (await this.loadModule(relPath)) logger.mark(`[Lain-plugin][加载按钮插件][${relPath}]`)
         }
         /** 监听 button 目录变化 */
         const btnWatcher = chokidar.watch(buttonDir, {
@@ -121,16 +158,14 @@ class Button {
             if (!file.endsWith('.js')) return
             const relPath = 'plugins/button/' + file
             this.unloadModule(relPath)
-            await this.loadModule(relPath)
-            logger.mark(`[Lain-plugin][新增按钮插件][${relPath}]`)
+            if (await this.loadModule(relPath)) logger.mark(`[Lain-plugin][新增按钮插件][${relPath}]`)
           })
           .on('change', async filePath => {
             const file = filePath.split('/').pop()
             if (!file.endsWith('.js')) return
             const relPath = 'plugins/button/' + file
             this.unloadModule(relPath)
-            await this.loadModule(relPath)
-            logger.mark(`[Lain-plugin][热更新按钮插件][${relPath}]`)
+            if (await this.loadModule(relPath)) logger.mark(`[Lain-plugin][热更新按钮插件][${relPath}]`)
           })
           .on('unlink', async filePath => {
             const file = filePath.split('/').pop()

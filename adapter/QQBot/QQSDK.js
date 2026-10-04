@@ -40,6 +40,8 @@ export default class QQSDK {
     if (this.config.model == 0 || this.config.model == 2) {
       /** 群聊和单聊事件 */
       this.config.intents.push('GROUP_AND_C2C_EVENT')
+      /** 可选接收群内全量消息；与需要 @ 机器人的默认群事件分开订阅。 */
+      if (this.config.groupAllMsg) this.config.intents.push('GROUP_MESSAGE_CREATE')
     }
 
     /** 是否启用频道 */
@@ -239,13 +241,18 @@ export default class QQSDK {
     if (Constans.Intends.GROUP_AND_C2C_EVENT === undefined) {
       Constans.Intends.GROUP_AND_C2C_EVENT = groupAndC2CIntent
     }
-    if (Constans.Intends.GROUP_MESSAGE_CREATE === undefined) {
-      Constans.Intends.GROUP_MESSAGE_CREATE = groupAndC2CIntent
-    }
+    // 群全量消息与群 @ 事件是不同的 gateway event / intent。
+    if (Constans.Intends.GROUP_MESSAGE_CREATE === undefined) Constans.Intends.GROUP_MESSAGE_CREATE = 1 << 24
 
     /** GROUP_MESSAGE_CREATE 与 GROUP_AT_MESSAGE_CREATE 的 payload 同为群消息结构 */
     if (!EventIndex.QQEvent.GROUP_MESSAGE_CREATE) {
       EventIndex.QQEvent.GROUP_MESSAGE_CREATE = 'message.group'
+    }
+    // 将交互事件单独发给适配器监听器，保留原始 event_id 用于按钮回调的 C2C 回复。
+    if (EventIndex.QQEvent.INTERACTION_CREATE === 'notice') {
+      EventIndex.QQEvent.INTERACTION_CREATE = 'interaction'
+      const parser = EventIndex.EventParserMap.get('notice')
+      if (parser && !EventIndex.EventParserMap.has('interaction')) EventIndex.EventParserMap.set('interaction', parser)
     }
     /** 用户申请入群；旧版 SDK 尚未包含该事件映射。 */
     if (!EventIndex.QQEvent.GROUP_JOIN_REQUEST) {
@@ -255,8 +262,50 @@ export default class QQSDK {
       EventIndex.EventParserMap.set('message.group', EventIndex.EventParserMap.get(EventIndex.QQEvent.GROUP_AT_MESSAGE_CREATE))
     }
 
+    QQSDK.patchDispatchEventType()
     QQSDK.wrapMessageParser('message.group')
     QQSDK.wrapMessageParser('message.private.friend')
+    for (const eventName of [
+      'notice.friend.increase',
+      'notice.friend.decrease',
+      'notice.friend.receive_open',
+      'notice.friend.receive_close'
+    ]) {
+      QQSDK.wrapNoticeEventId(eventName)
+    }
+  }
+
+  /** qq-group-bot 将 GROUP_AT_MESSAGE_CREATE 与 GROUP_MESSAGE_CREATE 合并到 message.group；恢复原始事件名供适配器分流。 */
+  static patchDispatchEventType () {
+    const prototype = QQBot.prototype
+    const dispatchEvent = prototype.dispatchEvent
+    if (!dispatchEvent || dispatchEvent._lainEventTypeWrapped) return
+
+    const wrapped = function (event, wsRes) {
+      if (['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE'].includes(event) && wsRes?.d) {
+        wsRes = {
+          ...wsRes,
+          d: { ...wsRes.d, qqbot_event_type: event }
+        }
+      }
+      return dispatchEvent.call(this, event, wsRes)
+    }
+    wrapped._lainEventTypeWrapped = true
+    prototype.dispatchEvent = wrapped
+  }
+
+  /** 保留好友增删、私聊消息许可通知的 event_id，供官方 C2C 被动回复使用。 */
+  static wrapNoticeEventId (eventName) {
+    const parser = EventIndex.EventParserMap.get(eventName)
+    if (!parser || parser._lainEventIdWrapped) return
+
+    const wrapped = function (event, payload) {
+      const result = parser.apply(this, [event, payload])
+      if (result && payload?.event_id) result.event_id = payload.event_id
+      return result
+    }
+    wrapped._lainEventIdWrapped = true
+    EventIndex.EventParserMap.set(eventName, wrapped)
   }
 
   static wrapMessageParser (eventName) {

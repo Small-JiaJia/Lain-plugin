@@ -14,11 +14,13 @@ import common from '../../lib/common/common.js'
 import Cfg from '../../lib/config/config.js'
 import Button from './plugins.js'
 import QQBotButton from './Button.js'
+import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 
 lain.DAU = {}
 
 const MESSAGE_CACHE_TTL = 12 * 60 * 60
+const nextQQBotMessageSeq = () => ((Date.now() % 100000000) ^ Math.floor(Math.random() * 65536)) % 65536
 
 export default class adapterQQBot {
   /** 传入基本配置 */
@@ -29,6 +31,8 @@ export default class adapterQQBot {
     this.sdk = sdk
     /** 基本配置 */
     this.config = sdk.config
+    /** bot_state 仅 30 QPM；短时间内复用同一群的查询结果。 */
+    this.groupBotStateCache = new Map()
 
     /** 监听事件 */
     if (!start) this.StartBot()
@@ -52,8 +56,10 @@ export default class adapterQQBot {
       if (await this.isDuplicateMessage(data, 'private')) return
       data = await this.message(data)
       if (data) {
-        await Bot.emit('message.private', data)
-        await Bot.emit('message', data)
+        await QQBotIdMap.handleQQBotPrivateMessage(data, async e => {
+          await Bot.emit('message.private', e)
+          await Bot.emit('message', e)
+        })
       }
     })
 
@@ -137,6 +143,7 @@ export default class adapterQQBot {
       getGroupMemberInfo: (group_id, user_id) => Bot.getGroupMemberInfo(group_id, user_id),
       /** QQ Bot v2 群管理：群禁言与入群自动审批策略。 */
       getGroupMuteStatus: async groupId => await this.getGroupMuteStatus(groupId),
+      getGroupBotState: async groupId => await this.getGroupBotState(groupId),
       setGroupMemberMute: async (groupId, userId, duration) => await this.setGroupMemberMute(groupId, userId, duration),
       setGroupMemberMutes: async (groupId, members) => await this.setGroupMemberMutes(groupId, members),
       getGroupJoinRequests: async (groupId, options) => await this.getGroupJoinRequests(groupId, options),
@@ -200,7 +207,14 @@ export default class adapterQQBot {
     } else if (!isGroup && userId) {
       if (subType === 'increase') Bot[this.id]?.fl.set(userId, { user_id: userId })
       if (subType === 'decrease') Bot[this.id]?.fl.delete(userId)
-      notice.friend = this.pickFriend(rawUserId)
+      const canReplyToEvent = subType === 'increase' || subType === 'receive_open'
+      notice.friend = this.pickFriend(rawUserId, {
+        messageId: '',
+        eventId: canReplyToEvent ? data.event_id || '' : ''
+      })
+      if (data.event_id && canReplyToEvent) {
+        notice.reply = async msg => await this.sendFriendMsg(rawUserId, msg, { eventId: data.event_id })
+      }
     }
 
     lain.info(this.id, `${isGroup ? '群' : '好友'}通知 ${subType}: ${rawGroupId || rawUserId || ''}`)
@@ -338,6 +352,7 @@ export default class adapterQQBot {
       muteMember: async (userId, time) => await this.setGroupMemberMute(groupID, userId, time),
       /** 查询群禁言状态（含当前被禁言成员）。 */
       getMuteStatus: async () => await this.getGroupMuteStatus(groupID),
+      getBotState: async () => await this.getGroupBotState(groupID),
       /** 拉取待处理的入群申请列表。 */
       getJoinRequests: async options => await this.getGroupJoinRequests(groupID, options),
       /** 审批入群申请；approve=false 时可通过 options.reject_reason 填写拒绝理由。 */
@@ -359,15 +374,27 @@ export default class adapterQQBot {
   }
 
   /** 好友对象 */
-  pickFriend(userId) {
+  pickFriend(userId, source = {}) {
+    const sourceMessageId = source.messageId || source.msgId || source.id || ''
+    const sourceEventId = source.eventId || ''
     return {
-      sendMsg: async (msg) => await this.sendFriendMsg(userId, msg),
+      sendMsg: async (msg) => await this.sendFriendMsg(userId, msg, { messageId: sourceMessageId, eventId: sourceEventId }),
       recallMsg: async (msg_id) => await this.recallPrivateMsg(userId, msg_id),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getMsg: async (msg_id) => await this.getCachedMessage('user', userId, msg_id),
       getChatHistory: async (msg_id, num = 1) => await this.getCachedChatHistory('user', userId, msg_id, num),
       /** OneBot upload_private_file 兼容。 */
-      sendFile: async (file, name) => await this.sendFriendFile(userId, file, name),
+      sendFile: async (file, name) => await this.sendFriendFile(userId, file, name, { messageId: sourceMessageId, eventId: sourceEventId }),
+      /** 通过官方 C2C stream_messages 接口发送/更新 Markdown 流。 */
+      openStream: (options = {}) => this.openC2CStream(userId, {
+        messageId: sourceMessageId,
+        ...options
+      }),
+      /** 通知客户端机器人正在输入；需要来自 C2C 消息的被动回复上下文。 */
+      sendInputNotify: (options = {}) => this.sendInputNotify(userId, {
+        messageId: sourceMessageId,
+        ...options
+      }),
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId)
     }
   }
@@ -399,7 +426,42 @@ export default class adapterQQBot {
   }
 
   getAvatarUrl(size = 0, id) {
-    return Number(id) ? `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${id}` : `https://q.qlogo.cn/qqapp/${this.id}/${id.split('-')[1] || id}/${size}`
+    const userId = String(id ?? '').trim()
+    if (Number(userId)) return `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${userId}`
+    return `https://q.qlogo.cn/qqapp/${this.id}/${this.stripQQBotId(userId)}/${size}`
+  }
+
+  stripQQBotId (id) {
+    const text = String(id ?? '').trim()
+    const prefix = `${this.id}-`
+    return text.startsWith(prefix) ? text.slice(prefix.length) : text
+  }
+
+  /** 官方 /bot_state：主动推送、接收范围及机器人在群内的身份。 */
+  async getGroupBotState (groupId, { fresh = false } = {}) {
+    const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const key = String(groupOpenid)
+    const cached = this.groupBotStateCache.get(key)
+    if (!fresh && cached && cached.expires > Date.now()) {
+      if (cached.error) throw cached.error
+      return cached.value
+    }
+    if (cached?.pending) return await cached.pending
+    const pending = this.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/bot_state`)
+      .then(({ data }) => {
+        if (!data || typeof data.allow_proactive_msg !== 'boolean' || !data.recv_msg_setting || !data.member_role) {
+          throw new Error('QQ群状态接口返回字段不完整，无法验证群权限')
+        }
+        this.groupBotStateCache.set(key, { value: data, expires: Date.now() + 15000 })
+        return data
+      })
+      .catch(error => {
+        const wrapped = new Error(`无法查询 QQ 群机器人状态（/bot_state）：${error.message || error}；请检查接口白名单及机器人权限`)
+        this.groupBotStateCache.set(key, { error: wrapped, expires: Date.now() + 10000 })
+        throw wrapped
+      })
+    this.groupBotStateCache.set(key, { pending })
+    return await pending
   }
 
   /**
@@ -408,6 +470,10 @@ export default class adapterQQBot {
    */
   async getGroupMuteStatus (groupId) {
     const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const state = await this.getGroupBotState(groupOpenid)
+    if (!['admin', 'owner'].includes(state.member_role)) {
+      throw new Error(`QQBot 查询群禁言失败：机器人在群内身份为 ${state.member_role}，需要群管理员权限`)
+    }
     const { data } = await this.sdk.request.get(
       `/v2/groups/${encodeURIComponent(groupOpenid)}/restrict_chat_setting`
     )
@@ -431,11 +497,15 @@ export default class adapterQQBot {
     if (!Array.isArray(members) || !members.length) {
       throw new Error('QQBot 设置群成员禁言失败：members 不能为空')
     }
-    if (members.length > 10) {
-      throw new Error('QQBot 设置群成员禁言失败：单次最多操作 10 名成员')
+    if (members.length > 20) {
+      throw new Error('QQBot 设置群成员禁言失败：单次最多操作 20 名成员')
     }
 
     const groupOpenid = await this.resolveOpenid(groupId, 'group')
+    const state = await this.getGroupBotState(groupOpenid, { fresh: true })
+    if (!['admin', 'owner'].includes(state.member_role)) {
+      throw new Error(`QQBot 设置群成员禁言失败：机器人在群内身份为 ${state.member_role}，需要群管理员权限`)
+    }
     const normalized = await Promise.all(members.map(async member => {
       let operation
       if (member?.member_openid && member?.op) {
@@ -447,9 +517,23 @@ export default class adapterQQBot {
       } else {
         operation = this.createMemberMuteOperation(member?.user_id ?? member?.userId, member?.duration ?? member?.time)
       }
+      const memberOpenid = await this.resolveOpenid(operation.member_openid, 'user')
+      let info
+      try {
+        const response = await this.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/members/${encodeURIComponent(memberOpenid)}`)
+        info = response.data
+      } catch (error) {
+        throw new Error(`QQBot 设置群成员禁言失败：无法验证成员 ${memberOpenid} 的权限：${error.message || error}`)
+      }
+      if (!info?.member_role || info.bot) {
+        throw new Error(`QQBot 设置群成员禁言失败：无法确认成员 ${memberOpenid} 是普通群成员`)
+      }
+      if (info.member_role !== 'member') {
+        throw new Error(`QQBot 设置群成员禁言失败：成员 ${memberOpenid} 是 ${info.member_role}，只能操作普通群成员`)
+      }
       return {
         ...operation,
-        member_openid: await this.resolveOpenid(operation.member_openid, 'user')
+        member_openid: memberOpenid
       }
     }))
 
@@ -635,7 +719,7 @@ export default class adapterQQBot {
    */
   async resolveOpenid (id, type) {
     let openid = String(id ?? '').trim()
-    if (!openid) throw new Error(`QQBot 撤回消息失败：缺少${type === 'group' ? '群' : '用户'} OpenID`)
+    if (!openid) throw new Error(`QQBot 缺少${type === 'group' ? '群' : '用户'} OpenID`)
 
     const prefix = `${this.id}-`
     if (openid.startsWith(prefix)) return openid.slice(prefix.length)
@@ -648,6 +732,10 @@ export default class adapterQQBot {
       } catch {
         // 映射不存在时仍可使用消息事件中携带的原始 OpenID。
       }
+    }
+
+    if (type === 'private' && /^\d+$/.test(openid)) {
+      throw new Error('QQBot 私聊 QQ 号尚未绑定 C2C 用户 OpenID')
     }
 
     return openid.startsWith(prefix) ? openid.slice(prefix.length) : openid
@@ -790,7 +878,7 @@ export default class adapterQQBot {
 
   /** 撤回私聊消息。 */
   async recallPrivateMsg (user_id, message_id) {
-    const userOpenid = await this.resolveOpenid(user_id, 'user')
+    const userOpenid = await this.resolveOpenid(user_id, 'private')
     const messageId = String(message_id ?? '').trim()
     if (!messageId) throw new Error('QQBot 撤回私聊消息失败：缺少消息 ID')
 
@@ -803,7 +891,9 @@ export default class adapterQQBot {
   /** QQ 富媒体文件：上传后通过 msg_type=7 发送 file_info。 */
   async uploadRichFile (targetType, targetId, file, name) {
     let upload = await this.resolveUploadFile(file, name)
-    const sendUpload = async value => await this.sdk.request.post(`/v2/${targetType}s/${targetId}/files`, {
+    const collection = `${targetType}s`
+    const encodedTargetId = encodeURIComponent(targetId)
+    const sendUpload = async value => await this.sdk.request.post(`/v2/${collection}/${encodedTargetId}/files`, {
       file_type: 4,
       // false 时只取得 file_info，随后由发送消息接口统一发送。
       srv_send_msg: false,
@@ -813,19 +903,17 @@ export default class adapterQQBot {
 
     let response
     try {
-      // 官方群文件接口支持 URL 直传；本地文件和 URL 下载失败后的回退使用
+      // 官方群与 C2C 文件接口支持 URL 直传；本地文件和 URL 下载失败后的回退使用
       // UploadPrepare → PUT 分片 → UploadPartFinish → /files 合并流程。
-      response = targetType === 'group' && upload.buffer
-        ? await this.uploadGroupFileInParts(targetId, upload)
+      response = upload.buffer
+        ? await this.uploadFileInParts(targetType, targetId, upload)
         : await sendUpload(upload)
     } catch (error) {
       // URL 直传在 QQ 服务端下载失败（850011）或内部代理失败（850012）时，
-      // 群文件改由本机下载并执行官方分片上传；私聊保留 file_data 回退。
+      // 文件改由本机下载并执行官方分片上传。
       if (!upload.buffer && this.isQQFileProxyError(error)) {
         upload = await this.resolveUploadFile(file, name, true)
-        response = targetType === 'group'
-          ? await this.uploadGroupFileInParts(targetId, upload)
-          : await sendUpload(upload)
+        response = await this.uploadFileInParts(targetType, targetId, upload)
       } else {
         throw error
       }
@@ -837,19 +925,21 @@ export default class adapterQQBot {
   }
 
   /**
-   * 群文件官方分片上传。
+   * 群与 C2C 文件官方分片上传。
    * 1. /upload_prepare 申请 upload_id 和预签名 PUT 地址；
    * 2. PUT 每个分片并调用 /upload_part_finish；
    * 3. /files 携带 upload_id 完成合并并取得 file_info。
    */
-  async uploadGroupFileInParts (groupId, upload) {
+  async uploadFileInParts (targetType, targetId, upload) {
     const buffer = upload.buffer
     if (!Buffer.isBuffer(buffer)) throw new Error('QQBot 分片上传失败：缺少文件数据')
     if (buffer.length > 200 * 1024 * 1024) throw new Error('QQBot 分片上传失败：文件超过 200MB 限制')
 
+    const collection = `${targetType}s`
+    const endpoint = `/v2/${collection}/${encodeURIComponent(targetId)}`
     const md5 = data => crypto.createHash('md5').update(data).digest('hex')
     const sha1 = data => crypto.createHash('sha1').update(data).digest('hex')
-    const { data: prepared } = await this.sdk.request.post(`/v2/groups/${groupId}/upload_prepare`, {
+    const { data: prepared } = await this.sdk.request.post(`${endpoint}/upload_prepare`, {
       file_type: 4,
       file_size: String(buffer.length),
       file_name: upload.name,
@@ -876,7 +966,7 @@ export default class adapterQQBot {
       if (partSize <= 0 || !part.presigned_url) throw new Error('QQBot 分片上传失败：分片信息无效')
       const chunk = buffer.subarray(offset, offset + partSize)
       await this.putUploadPart(part.presigned_url, chunk, retryTimeout, retryDelay)
-      await this.sdk.request.post(`/v2/groups/${groupId}/upload_part_finish`, {
+      await this.sdk.request.post(`${endpoint}/upload_part_finish`, {
         upload_id: uploadId,
         part_index: Number(part.index),
         block_size: String(chunk.length),
@@ -887,7 +977,7 @@ export default class adapterQQBot {
 
     if (offset !== buffer.length) throw new Error('QQBot 分片上传失败：服务端返回的分片数量与文件大小不匹配')
 
-    return await this.sdk.request.post(`/v2/groups/${groupId}/files`, {
+    return await this.sdk.request.post(`${endpoint}/files`, {
       file_type: 4,
       file_name: upload.name,
       srv_send_msg: false,
@@ -921,28 +1011,29 @@ export default class adapterQQBot {
     throw new Error(`QQBot 分片上传失败：${error?.message || error}`)
   }
 
-  /** 发送 QQ 富媒体文件消息。sourceId 存在时按被动回复发送。 */
-  async sendRichFile (targetType, targetId, file, name, sourceId) {
+  /** 发送 QQ 富媒体文件消息。C2C / 群被动回复时附带消息上下文。 */
+  async sendRichFile (targetType, targetId, file, name, source = {}) {
     const uploaded = await this.uploadRichFile(targetType, targetId, file, name)
     const payload = {
       content: uploaded.name || '文件',
       msg_type: 7,
       media: { file_info: uploaded.file_info }
     }
-    if (sourceId) {
-      payload.msg_id = sourceId
-      payload.msg_seq = Math.floor(Math.random() * 1000000) + 1
-      payload.message_reference = { message_id: sourceId }
+    const context = typeof source === 'string' ? { messageId: source } : (source || {})
+    const sourceMessageId = context.messageId || context.msgId || context.id || ''
+    const sourceEventId = context.eventId || ''
+    if (sourceMessageId) {
+      payload.msg_id = sourceMessageId
+      payload.msg_seq = nextQQBotMessageSeq()
+    } else if (sourceEventId) {
+      payload.event_id = sourceEventId
     }
-    const { data } = await this.sdk.request.post(`/v2/${targetType}s/${targetId}/messages`, payload)
+    const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
     if (!data?.id) throw new Error('QQBot 文件消息发送失败：响应中没有消息 ID')
     return { ...data, file_id: uploaded.file_uuid, file_info: uploaded.file_info }
   }
 
-  /**
-   * 兼容本地路径、base64、Buffer 与 URL。
-   * 群文件的本地内容会走官方分片上传；私聊维持 file_data Base64 直传。
-   */
+  /** 兼容本地路径、base64、Buffer 与 URL；本地文件走官方分片上传。 */
   async resolveUploadFile (file, name, preferFileData = false) {
     const source = file?.url || file?.file || file
     if (!source) throw new Error('QQBot 文件上传失败：缺少 file 参数')
@@ -999,6 +1090,8 @@ export default class adapterQQBot {
     e.post_type = 'message'
     e.uin = this.id // ???鬼知道哪来的这玩意，icqq都没有...
     e.tiny_id = tinyId
+    e.qqbot_event_type = e.qqbot_event_type || data.qqbot_event_type || ''
+    e.qqbot_event_id = e.event_id || data.event_id || ''
     e.time = data.timestamp
     e.self_id = this.id
     e.bot = Bot[this.id]
@@ -1007,6 +1100,18 @@ export default class adapterQQBot {
     e.qqbot_message = e.message.map(i => ({ ...i }))
     e.raw_message = String(e.raw_message || '').trim()
     this.normalizeIncomingMessage(e, tinyId)
+    if (isGroup && rawGroupId) {
+      try {
+        const state = await this.getGroupBotState(rawGroupId)
+        e.qqbot_group_state = state
+        e.qqbot_recv_msg_setting = state.recv_msg_setting
+        e.qqbot_allow_proactive_msg = state.allow_proactive_msg
+      } catch (error) {
+        e.qqbot_group_state_error = error.message
+        // 全量事件自身仍能确定按钮不应自动 @，不依赖受限的查询接口。
+        e.qqbot_recv_msg_setting = e.qqbot_is_group_all ? 'all' : 'only_mention'
+      }
+    }
 
     if (Bot[this.id].config.other.Prefix) {
       e.message.some(msg => {
@@ -1037,17 +1142,13 @@ export default class adapterQQBot {
 
     /** 构建快速回复消息（自动附加按钮插件） */
     e.reply = async (msg, quote) => {
-      if (quote?.markdown) return await this.sendMarkdownReplyMsg(e, msg, quote)
-      if (e.adapter === 'QQBot') {
-        // 提取 Button.create() 生成的按钮对象
-        if (Array.isArray(msg)) {
-          const extracted = QQBotButton.extract(msg)
-          msg = extracted.msgs
-          if (extracted.button) {
-            msg = [...msg, extracted.button]
-          }
-        }
-        // 自动附加 button 插件按钮
+      if (quote?.markdown) return await e.markdown(msg, quote)
+      // 此回复函数始终由 QQBot 创建。身份转译可能改写 e.adapter，
+      // 但按钮仍需通过原始 QQBot 通道发送。
+      const hasExplicitButtons = common.array(msg).some(item =>
+        item?.type === 'keyboard' || item?.type === 'button' || QQBotButton.isButton(item)
+      )
+      if (!hasExplicitButtons) {
         const btnRows = await getAutoButtons()
         if (btnRows?.length) {
           msg = Array.isArray(msg) ? [...msg, ...btnRows] : [msg, ...btnRows]
@@ -1056,7 +1157,7 @@ export default class adapterQQBot {
       return await this.sendReplyMsg(e, msg, quote)
     }
     e.markdown = async (msg, options = {}) => {
-      if (!options.buttons && !options.button && e.adapter === 'QQBot') {
+      if (!options.buttons && !options.button) {
         const btnRows = await getAutoButtons()
         if (btnRows?.length) options.buttons = btnRows
       }
@@ -1066,12 +1167,12 @@ export default class adapterQQBot {
     e.sendMarkdown = e.markdown
     /** 快速撤回 */
     e.recall = async () => isGroup
-      ? await this.recallGroupMsg(data.group_id, data.message_id)
-      : await this.recallPrivateMsg(data.user_id, data.message_id)
+      ? await this.recallGroupMsg(rawGroupId, e.message_id || data.id)
+      : await this.recallPrivateMsg(senderOpenid, e.message_id || data.id)
     /** 将收到的消息转为字符串 */
     e.toString = () => e.raw_message
     /** 获取对应用户头像 */
-    e.getAvatarUrl = (size = 0) => this.getAvatarUrl(size, data.user_id)
+    e.getAvatarUrl = (size = 0) => this.getAvatarUrl(size, senderOpenid)
 
     /** 构建场景对应的方法 */
     if (isGroup) {
@@ -1090,7 +1191,10 @@ export default class adapterQQBot {
       e.message_type = 'group'
       e.sub_type = 'normal'
     } else {
-      e.friend = this.pickFriend(e.user_id)
+      e.friend = this.pickFriend(this.formatQQBotId(senderOpenid), {
+        messageId: e.message_id || data.id,
+        eventId: e.qqbot_event_id
+      })
       e.message_type = 'private'
       e.sub_type = 'friend'
     }
@@ -1162,15 +1266,48 @@ export default class adapterQQBot {
 
   normalizeIncomingMessage(e, tinyId) {
     const message = Array.isArray(e.message) ? e.message : []
-    const cleanId = id => String(id ?? '').replace(/^qg_/, '').split('-').pop()
+    const cleanId = id => {
+      const text = String(id ?? '').trim().replace(/^qg_/, '')
+      const prefix = `${this.id}-`
+      return text.startsWith(prefix) ? text.slice(prefix.length) : text
+    }
     const selfIds = new Set([cleanId(this.id), cleanId(tinyId), cleanId(e.tiny_id)].filter(Boolean))
-    const isGroupAtEvent = String(e.event_id || '').startsWith('GROUP_AT_MESSAGE_CREATE:')
+    const eventType = e.qqbot_event_type || e.data?.qqbot_event_type || ''
+    const isGroupAtEvent = eventType === 'GROUP_AT_MESSAGE_CREATE'
+    const isGroupAllEvent = eventType === 'GROUP_MESSAGE_CREATE'
+    e.qqbot_is_group_at = isGroupAtEvent
+    e.qqbot_is_group_all = isGroupAllEvent
     const contentMention = String(e.content || '').match(/^<@!?([^>]+)>/)
 
-    e.atme = message.some(i => {
+    const isSelfAt = i => {
       if (i?.type !== 'at') return false
-      return [i.qq, i.id, i.user_id, i.tiny_id].some(id => selfIds.has(cleanId(id)))
-    }) || isGroupAtEvent || !!(contentMention && selfIds.has(cleanId(contentMention[1])))
+      if (i.is_you || i.is_bot || i.is_self) return true
+      return [i.qq, i.id, i.user_id, i.tiny_id, i.member_openid, i.user_openid]
+        .some(id => selfIds.has(cleanId(id)))
+    }
+    e.atme = message.some(isSelfAt) || isGroupAtEvent || !!(contentMention && selfIds.has(cleanId(contentMention[1])))
+
+    // QQBot 的 @ 事件本身已表达“调用机器人”。去掉消息数组里的机器人
+    // at 段，避免 ICQQ 兼容层把它当作普通目标用户 @；其他用户的 at 保留。
+    if (!e.qqbot_at_normalized) {
+      let removedSelfAt = false
+      if (Array.isArray(e.message)) {
+        e.message = e.message.filter(item => {
+          if (item?.type !== 'at') return true
+          const ids = [item.qq, item.id, item.user_id, item.tiny_id, item.member_openid, item.user_openid]
+          const selfMention = isSelfAt(item) || (contentMention && ids.some(id => cleanId(id) === cleanId(contentMention[1])))
+          if (selfMention) removedSelfAt = true
+          return !selfMention
+        })
+      }
+      // GROUP_AT_MESSAGE_CREATE 保证机器人被 @。某些 SDK 版本不会把机器人的
+      // OpenID 放进 at 段，因而用事件语义移除首个 at 段作为兼容回退。
+      if (isGroupAtEvent && !removedSelfAt && Array.isArray(e.message)) {
+        const index = e.message.findIndex(item => item?.type === 'at')
+        if (index >= 0) e.message.splice(index, 1)
+      }
+      e.qqbot_at_normalized = true
+    }
 
     const text = message
       .filter(i => i?.type === 'text')
@@ -1245,7 +1382,7 @@ export default class adapterQQBot {
   }
 
   getMessageUserOpenid(e) {
-    return String(e.author?.member_openid || e.sender?.member_openid || e.sender?.user_openid || e.user_id || e.author?.id || '').trim()
+    return String(e.author?.member_openid || e.sender?.member_openid || e.author?.user_openid || e.sender?.user_openid || e.user_id || e.author?.id || '').trim()
   }
 
   getMessageMemberOpenid(e) {
@@ -1265,7 +1402,7 @@ export default class adapterQQBot {
   formatQQBotId(id) {
     const text = String(id ?? '').trim()
     if (!text) return undefined
-    return text.startsWith(`${this.id}-`) ? text : `${this.id}-${text.split('-').pop()}`
+    return text.startsWith(`${this.id}-`) ? text : `${this.id}-${text}`
   }
 
   /** 前缀处理 */
@@ -1389,6 +1526,11 @@ export default class adapterQQBot {
           if (!String(i.text || '').trim()) break
           let text = i.type === 'forward' ? String(i.text).trim() + '\n' : String(i.text).trim()
           text = text.replace('@everyone', 'everyone')
+          const inlineCommands = this.extractMqqapiInlineCommands(text)
+          text = inlineCommands.content
+          if (inlineCommands.buttons.length) {
+            buttonRows.push(...this.normalizeButtons(e, [inlineCommands.buttons]))
+          }
           for (const p of this.HandleURL(text)) {
             if (p.type === 'button' || p.type === 'keyboard') buttonRows.push(...this.normalizeButtons(e, p))
             else appendText(p.text)
@@ -1403,8 +1545,8 @@ export default class adapterQQBot {
             if (Bot.QQToOpenid) {
               try { qq = await Bot.QQToOpenid(i.qq || i.id, e) } catch { }
             }
-            qq = String(qq || i.qq || i.id || '').trim().split('-')
-            content += `<qqbot-at-user id="${qq[1] || qq[0]}" />`
+            qq = this.stripQQBotId(qq || i.qq || i.id || '')
+            content += `<qqbot-at-user id="${qq}" />`
           }
           break
         }
@@ -1420,7 +1562,13 @@ export default class adapterQQBot {
           buttonRows.push(...this.normalizeButtons(e, i))
           break
         case 'markdown':
-          appendText(await this.makeMarkdownContent(e, i.data || i))
+          {
+            const inlineCommands = this.extractMqqapiInlineCommands(await this.makeMarkdownContent(e, i.data || i))
+            appendText(inlineCommands.content)
+            if (inlineCommands.buttons.length) {
+              buttonRows.push(...this.normalizeButtons(e, [inlineCommands.buttons]))
+            }
+          }
           break
         case 'reply':
           reply = i
@@ -1635,21 +1783,37 @@ export default class adapterQQBot {
       for (const btn of items) {
         if (!btn) continue
         if (btn.render_data && btn.action) {
-          buttons.push(btn)
+          const inlineCommand = Number(btn.action.type) === 0
+            ? this.parseMqqapiInlineCommand(btn.action.data)
+            : null
+          if (inlineCommand) {
+            buttons.push(this.normalizeGroupButtonAction(e, {
+              ...btn,
+              action: {
+                ...btn.action,
+                type: 2,
+                data: inlineCommand.command,
+                enter: inlineCommand.enter
+              }
+            }))
+          } else {
+            buttons.push(this.normalizeGroupButtonAction(e, btn))
+          }
         } else {
+          const inlineCommand = btn.link ? this.parseMqqapiInlineCommand(btn.link) : null
           const built = this.buildButton(e, {
             text: btn.text ?? btn.label ?? btn.data ?? btn.input ?? btn.callback ?? btn.link ?? '',
             clicked_text: btn.clicked_text ?? btn.visited_label,
-            link: btn.link,
+            link: inlineCommand ? undefined : btn.link,
             callback: btn.callback,
-            input: btn.input ?? (!btn.link && btn.callback == null ? btn.data : undefined),
-            send: btn.send ?? btn.enter ?? (!btn.link && btn.callback == null && btn.data != null ? true : undefined),
-            permission: btn.permission ?? btn.list,
+            input: inlineCommand?.command ?? btn.input ?? (!btn.link && btn.callback == null ? btn.data : undefined),
+            send: inlineCommand?.enter ?? btn.send ?? btn.enter ?? (!btn.link && btn.callback == null && btn.data != null ? true : undefined),
+            permission: btn.permission ?? (btn.admin ? 'admin' : btn.list),
             style: btn.style,
             tips: btn.tips ?? btn.unsupport_tips,
             QQBot: btn.QQBot,
           }, buttons.length % 2)
-          if (built) buttons.push(built)
+          if (built) buttons.push(this.normalizeGroupButtonAction(e, built))
         }
         if (buttons.length >= 5) {
           result.push({ buttons: buttons.splice(0, 5) })
@@ -1718,8 +1882,8 @@ export default class adapterQQBot {
                 qq = await Bot.QQToOpenid(i.qq || i.id, e)
               } catch { }
             }
-            qq = String(qq || i.qq || i.id || '').trim().split('-')
-            content.push(`<qqbot-at-user id="${qq[1] || qq[0]}" />`)
+            qq = this.stripQQBotId(qq || i.qq || i.id || '')
+            content.push(`<qqbot-at-user id="${qq}" />`)
           }
           break
         case 'image': {
@@ -1743,14 +1907,53 @@ export default class adapterQQBot {
 
   async makeMarkdownMessage(e, data, options = {}) {
     const markdown = await this.makeMarkdownSegment(e, data, options)
+    const inlineCommands = this.extractMqqapiInlineCommands(markdown.content)
+    markdown.content = inlineCommands.content || (inlineCommands.buttons.length ? ' ' : inlineCommands.content)
     const message = [markdown]
 
     const btnRows = this.normalizeButtons(e, options.buttons || options.button)
-    if (btnRows.length) {
-      message.push({ type: 'keyboard', content: { rows: btnRows } })
+    const inlineButtonRows = this.normalizeButtons(e, [inlineCommands.buttons])
+    const allButtonRows = [...inlineButtonRows, ...btnRows].slice(0, 5)
+    if (allButtonRows.length) {
+      message.push({ type: 'keyboard', content: { rows: allButtonRows } })
     }
 
     return message
+  }
+
+  /** 解析 QQ 内联命令链接，用原生输入按钮发送命令，避免按外部应用链接打开。 */
+  parseMqqapiInlineCommand (link) {
+    try {
+      const url = new URL(String(link || '').replace(/&amp;/g, '&'))
+      if (url.protocol !== 'mqqapi:' || url.hostname !== 'aio' || url.pathname !== '/inlinecmd') return null
+      const command = url.searchParams.get('command')
+      if (command == null || !command.trim()) return null
+      return {
+        command,
+        enter: /^(true|1)$/i.test(url.searchParams.get('enter') || '')
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** 从 Markdown 正文提取 mqqapi inlinecmd 链接并保留为底部原生按钮。 */
+  extractMqqapiInlineCommands (content) {
+    const buttons = []
+    const markdown = String(content || '').replace(
+      /\[([^\]]+)\]\s*\(\s*(mqqapi:\/\/aio\/inlinecmd\?[^\s)]+)\s*\)/gi,
+      (link, label, url) => {
+        const command = this.parseMqqapiInlineCommand(url)
+        if (!command) return link
+        buttons.push({ text: label.trim(), input: command.command, send: command.enter })
+        return ''
+      }
+    )
+
+    return {
+      content: markdown.replace(/\n{3,}/g, '\n\n').trim(),
+      buttons
+    }
   }
 
   async sendMarkdownReplyMsg(e, data, options = {}) {
@@ -1763,15 +1966,24 @@ export default class adapterQQBot {
   /** 按钮添加 */
   async button(e) {
     try {
-      for (let p of Button) {
-        for (let v of p.plugin.rule) {
-          const regExp = new RegExp(v.reg)
-          if (regExp.test(e.msg)) {
-            p.e = e
-            const button = await p[v.fnc](e)
-            /** 无返回不添加 */
-            if (button) return [...(Array.isArray(button) ? button : [button])]
-          }
+      // 合并后的扩展文件含有来自多个旧文件的规则；按规则原优先级统一排序。
+      const rules = []
+      for (const module of Button) {
+        for (const rule of module.plugin.rule) {
+          rules.push({
+            module,
+            rule,
+            priority: Number(rule.priority ?? module.plugin.priority),
+            source: String(rule.sourceFile ?? module.plugin._path ?? '')
+          })
+        }
+      }
+      rules.sort((a, b) => a.priority - b.priority || a.source.localeCompare(b.source, 'zh-CN'))
+      for (const { module, rule } of rules) {
+        if (new RegExp(rule.reg).test(String(e.msg ?? ''))) {
+          module.e = e
+          const button = await module[rule.fnc](e)
+          if (button) return [...(Array.isArray(button) ? button : [button])]
         }
       }
       return false
@@ -1781,12 +1993,52 @@ export default class adapterQQBot {
     }
   }
 
-  /**
-   * 发送好友主动消息。
-   * 不携带 msg_id/event_id，受 QQBot 用户主动消息开关与平台频控约束。
-   */
-  async sendFriendMsg(userId, data) {
-    userId = userId.split('-')?.[1] || userId
+  /** 建立以当前 C2C 入站消息为锚点的流式 Markdown 回复。 */
+  async openC2CStream (userId, { messageId, msgId, throttleMs = 500 } = {}) {
+    const userOpenid = await this.resolveOpenid(userId, 'private')
+    const sourceMessageId = String(messageId || msgId || '').trim()
+    if (!sourceMessageId) throw new Error('QQBot C2C 流式消息需要入站消息 ID')
+
+    return new C2CStream({
+      msgId: sourceMessageId,
+      // stream_messages 的 event_id 锚定入站消息；腾讯当前 SDK 默认同 msg_id。
+      eventId: sourceMessageId,
+      throttleMs,
+      logger,
+      send: payload => this.sdk.request.post(
+        `/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`,
+        payload
+      )
+    })
+  }
+
+  /** C2C 输入状态通知（msg_type=6）。 */
+  async sendInputNotify (userId, { messageId, msgId, inputSecond = 60 } = {}) {
+    const userOpenid = await this.resolveOpenid(userId, 'private')
+    const sourceMessageId = String(messageId || msgId || '').trim()
+    if (!sourceMessageId) throw new Error('QQBot 输入状态通知需要 C2C 入站消息 ID')
+
+    const seconds = Number(inputSecond)
+    const payload = {
+      msg_type: 6,
+      msg_seq: nextQQBotMessageSeq(),
+      input_notify: {
+        input_type: 1,
+        input_second: Number.isFinite(seconds) ? Math.max(1, Math.min(60, Math.floor(seconds))) : 60
+      }
+    }
+    payload.msg_id = sourceMessageId
+
+    const { data } = await this.sdk.request.post(
+      `/v2/users/${encodeURIComponent(userOpenid)}/messages`,
+      payload
+    )
+    return data
+  }
+
+  /** 发送私聊消息；未传入 source 时按主动消息发送，有上下文时使用被动回复字段。 */
+  async sendFriendMsg(userId, data, source = {}) {
+    userId = await this.resolveOpenid(userId, 'private')
     /** 构建一个普通e给按钮用 */
     let e = {
       bot: Bot[this.id],
@@ -1796,15 +2048,10 @@ export default class adapterQQBot {
 
     e.message.forEach(i => { if (i.type === 'text') e.msg = (e.msg || '') + (i.text || '').trim() })
     const { Pieces, reply } = await this.getQQBot(data, e)
-    if (Bot.QQToOpenid) {
-      try {
-        userId = await Bot.QQToOpenid(userId, e, 'user')
-      } catch { }
-    }
     let result
     for (let i of Pieces) {
       if (reply) i = Array.isArray(i) ? [...i, reply] : [i, reply]
-      const res = await this.sendQQBotPiece('user', userId, i)
+      const res = await this.sendQQBotPiece('user', userId, i, source)
       // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
       result ||= res
       logger.debug('发送主动好友消息：', JSON.stringify(i))
@@ -1818,30 +2065,32 @@ export default class adapterQQBot {
    * 发送群主动消息。
    * 不携带 msg_id/event_id；群主须开启机器人主动发言权限。
    */
-  async sendGroupMsg(groupID, data) {
+  async sendGroupMsg(groupID, data, source = {}) {
+    const context = typeof source === 'string' ? { messageId: source } : (source || {})
+    let state
+    if (!context.messageId && !context.msgId && !context.id && !context.eventId) {
+      state = await this.getGroupBotState(groupID)
+      if (!state.allow_proactive_msg) {
+        throw new Error('QQBot 群主动消息发送失败：该群未开启机器人主动推送，请群主在群机器人设置中开启')
+      }
+    }
     /** 构建一个普通e给按钮用 */
     let e = {
       bot: Bot[this.id],
       group_id: groupID,
+      qqbot_recv_msg_setting: context.recvMsgSetting || state?.recv_msg_setting,
       user_id: 'QQBot',
       message: common.array(data)
     }
 
     e.message.forEach(i => { if (i.type === 'text') e.msg = (e.msg || '') + (i.text || '').trim() })
     const { Pieces, reply } = await this.getQQBot(data, e)
-    /** 获取正确的id */
-    if (Bot.QQToOpenid) {
-      try {
-        groupID = await Bot.QQToOpenid(groupID, e, 'group')
-      } catch {
-        groupID = groupID.split('-')[1] || groupID.split('-')[0] || groupID
-      }
-    }
+    groupID = await this.resolveOpenid(groupID, 'group')
 
     let result
     for (let i of Pieces) {
       if (reply) i = Array.isArray(i) ? [...i, reply] : [i, reply]
-      const res = await this.sendQQBotPiece('group', groupID, i)
+      const res = await this.sendQQBotPiece('group', groupID, i, source)
       // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
       result ||= res
       this.send_count()
@@ -1852,42 +2101,52 @@ export default class adapterQQBot {
   }
 
   /** 主动发送 OneBot 文件。 */
-  async sendFriendFile (userId, file, name) {
-    userId = String(userId).split('-').pop() || userId
-    return this.returnResult(await this.sendRichFile('user', userId, file, name))
+  async sendFriendFile (userId, file, name, source = {}) {
+    userId = await this.resolveOpenid(userId, 'private')
+    return this.returnResult(await this.sendRichFile('user', userId, file, name, source))
   }
 
   /** 主动发送 OneBot 文件。 */
   async sendGroupFile (groupID, file, name) {
-    let e = { bot: Bot[this.id], group_id: groupID, user_id: 'QQBot' }
-    if (Bot.QQToOpenid) {
-      try {
-        groupID = await Bot.QQToOpenid(groupID, e, 'group')
-      } catch {
-        groupID = String(groupID).split('-')[1] || String(groupID).split('-')[0] || groupID
-      }
+    const state = await this.getGroupBotState(groupID)
+    if (!state.allow_proactive_msg) {
+      throw new Error('QQBot 群主动文件发送失败：该群未开启机器人主动推送，请群主在群机器人设置中开启')
     }
+    groupID = await this.resolveOpenid(groupID, 'group')
     return this.returnResult(await this.sendRichFile('group', groupID, file, name))
   }
 
   /** 一条云崽消息可包含普通内容和文件；文件通过富媒体接口单独发送。 */
-  async sendQQBotPiece (targetType, targetId, message, sourceId) {
+  async sendQQBotPiece (targetType, targetId, message, source = {}) {
     const parts = common.array(message)
     const files = parts.filter(item => item?.type === 'file')
     const normal = parts.filter(item => item?.type !== 'file')
     const reply = normal.find(item => item?.type === 'reply')
     const normalContent = normal.filter(item => item?.type !== 'reply')
-    const fileSourceId = sourceId || reply?.id
+    const context = typeof source === 'string' ? { messageId: source } : (source || {})
+    const sourceMessageId = context.messageId || context.msgId || context.id || reply?.id || ''
+    const sourceEventId = context.eventId || reply?.event_id || ''
+    const sendSource = sourceEventId
+      ? (sourceMessageId ? { messageId: sourceMessageId } : { eventId: sourceEventId })
+      : sourceMessageId ? { messageId: sourceMessageId } : {}
     let result
 
     for (const file of files) {
-      result ||= await this.sendRichFile(targetType, targetId, file.file || file.url, file.name, fileSourceId)
+      const sent = await this.sendRichFile(targetType, targetId, file.file || file.url, file.name, sendSource)
+      result ||= sent
     }
     // 文件消息的 reply 段已被转换为 msg_id；避免再单独发送一个空引用消息。
     if (normalContent.length) {
       const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
-      // 不传 source，SDK 不会写入 msg_id，确保这里是官方定义的主动消息。
-      result ||= await send(targetId, normal)
+      const useEventReply = !!sourceEventId && !sourceMessageId
+      const sendable = useEventReply
+        ? [{ type: 'reply', event_id: sourceEventId }, ...normalContent]
+        : normalContent
+      // 只传 SDK source.id，让 SDK 设置官方 msg_id/msg_seq；不传 reply 段，
+      // 避免其额外写入 C2C 暂不支持的 message_reference 字段。
+      const sdkSource = !useEventReply && sourceMessageId ? { id: sourceMessageId } : undefined
+      const sent = await send(encodeURIComponent(targetId), sendable, sdkSource)
+      result ||= sent
     }
     if (!result) throw new Error('QQBot 消息内容为空')
     return result
@@ -1926,12 +2185,13 @@ export default class adapterQQBot {
     try {
       this.send_count()
       logger.debug('发送回复消息：', JSON.stringify(msg))
-      const replyId = e.qqbot_message_id || e.message_id
-      msg = Array.isArray(msg) ? [{ type: 'reply', id: replyId }, ...msg] : [{ type: 'reply', id: replyId }, msg]
+      const replyId = e.qqbot_message_id || e.message_id || e.data?.id
+      const source = { messageId: replyId }
+      if (replyId) msg = Array.isArray(msg) ? [{ type: 'reply', id: replyId }, ...msg] : [{ type: 'reply', id: replyId }, msg]
       if (!e.friend) {
-        return { ok: true, data: await this.sendQQBotPiece('group', e.data.group_id, msg, replyId) }
+        return { ok: true, data: await this.sendQQBotPiece('group', e.group_openid || e.data?.group_openid || e.data?.group_id, msg, source) }
       } else {
-        return { ok: true, data: await this.sendQQBotPiece('user', e.data.user_id, msg, replyId) }
+        return { ok: true, data: await this.sendQQBotPiece('user', e.user_openid || e.member_openid || e.data?.author?.user_openid || e.data?.user_id, msg, source) }
       }
     } catch (err) {
       const error = err.message || err
@@ -2102,15 +2362,20 @@ export default class adapterQQBot {
       group_id: callback?.group_id ? this.id + '-' + callback.group_id : undefined,
       sender: { user_id: this.id + '-' + operatorId },
       message: [
-        { type: 'at', qq: this.id },
         { type: 'text', text: msg },
       ],
+      atme: true,
+      qqbot_recv_msg_setting: callback?.recv_msg_setting,
       raw_message: msg,
+      msg,
       reply: async (replyMsg) => {
         if (callback?.group_id) {
-          return this.sendGroupMsg(callback.group_id, replyMsg)
+          return this.sendGroupMsg(callback.group_id, replyMsg, {
+            eventId: event.event_id || event.id,
+            recvMsgSetting: callback.recv_msg_setting
+          })
         } else {
-          return this.sendFriendMsg(operatorId, replyMsg)
+          return this.sendFriendMsg(operatorId, replyMsg, { eventId: event.event_id || event.id })
         }
       },
     }
@@ -2200,7 +2465,22 @@ export default class adapterQQBot {
       }
     }
 
-    return msg
+    return this.normalizeGroupButtonAction(e, msg)
+  }
+
+  /** 全量接收群里的指令按钮使用回调，点击时不会由 QQ 客户端自动插入 @bot。 */
+  normalizeGroupButtonAction (e, button) {
+    const convert = !!e?.group_id && e.qqbot_recv_msg_setting === 'all' && Number(button?.action?.type) === 2
+    if (!convert && Number(button?.action?.type) !== 1) return button
+    if (String(button.id).startsWith('bt_') && Bot[this.id]?.callback?.[button.id]) return button
+    const id = 'bt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
+    const converted = {
+      ...button,
+      id,
+      action: convert ? { ...button.action, type: 1, enter: false, reply: false } : button.action
+    }
+    this._trackCallback(e, id, converted.action.data)
+    return converted
   }
 
   /** 构建按钮行（支持二维数组） */
@@ -2229,6 +2509,7 @@ export default class adapterQQBot {
       user_id: e.user_id,
       group_id: e.group_id ? String(e.group_id).replace(this.id + '-', '') : undefined,
       message,
+      recv_msg_setting: e.qqbot_recv_msg_setting,
       message_id: e._ret_id || [],
     }
     setTimeout(() => {

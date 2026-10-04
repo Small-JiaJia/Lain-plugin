@@ -561,6 +561,7 @@ export default class MilkyAdapter {
 
       const emit = async event => Bot.em(`${event.post_type}.${event.message_type}.normal`, event)
       if (await QQBotIdMap.handleQQGroupMessage(data, emit)) return
+      if (await QQBotIdMap.handleQQPrivateMessage(data, emit)) return
       Bot.em(`${data.post_type}.${data.message_type}.normal`, data)
     }
 

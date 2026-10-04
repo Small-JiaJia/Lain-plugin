@@ -8,6 +8,8 @@ const DATA_FILE = path.join(process.cwd(), 'data/lain-plugin/qqbot-openid-map.js
 const pendingQQBot = new Map()
 const pendingQQ = new Map()
 const recentQQBot = new Map()
+const pendingQQPrivate = new Map()
+const recentQQBotPrivate = new Map()
 
 class QQBotIdMap {
   static data = {
@@ -27,17 +29,18 @@ class QQBotIdMap {
     Bot.QQBotIdMap = this
     Bot.QQToOpenid = async (id, e = {}, type = 'user') => {
       const self_id = String(e.qqbot_self_id || e.qqbot_appid || e.bot?.config?.appid || e.self_id || e.bot?.uin || '')
-      if (!self_id || id == null) return this.stripSelfId(id)
+      if (!self_id || id == null) return this.stripSelfId(id, self_id)
 
       if (type === 'group') {
         const group = this.findGroupByQQ(self_id, id)
-        return this.stripSelfId(group?.group_openid || id)
+        return this.stripSelfId(group?.group_openid || id, self_id)
       }
 
       const groupOpenid = this.getEventGroupOpenid(e, self_id)
       const groupQQ = this.getEventGroupQQ(e)
-      const user = this.findUserByQQ(self_id, id, { groupOpenid, groupQQ })
-      return this.stripSelfId(user?.user_openid || id)
+      const preferPrivate = type === 'private' || e.message_type === 'private' || e.isPrivate
+      const user = this.findUserByQQ(self_id, id, { groupOpenid, groupQQ, preferPrivate })
+      return this.stripSelfId(user?.user_openid || id, self_id)
     }
   }
 
@@ -84,7 +87,7 @@ class QQBotIdMap {
     }
   }
 
-  static bind ({ self_id, user_openid, group_openid, qq, group_qq, nickname = '', group_name = '', qq_self_id = '', qq_adapter = '' }) {
+  static bind ({ self_id, user_openid, group_openid, qq, group_qq, nickname = '', group_name = '', qq_self_id = '', qq_adapter = '', private: isPrivate = false }) {
     this.load()
     self_id = String(self_id || '')
     if (!self_id) return null
@@ -135,6 +138,7 @@ class QQBotIdMap {
         nickname: nickname || old.nickname || '',
         qq_self_id: qqSelfId || old.qq_self_id || null,
         qq_adapter: qqAdapter || old.qq_adapter || '',
+        c2c: !!(isPrivate || old.c2c),
         groups,
         created_at: old.created_at || now,
         updated_at: now
@@ -190,7 +194,7 @@ class QQBotIdMap {
   static getStoredMapping (e) {
     this.load()
     const self_id = String(e.self_id || '')
-    if (!self_id) return { user: false, group: false }
+    if (!self_id) return { user: false, group: false, mentions: true, mapping: { mentions: {} } }
 
     const userOpenid = this.normalizeOpenid(e.user_openid || e.member_openid || e.user_id, self_id)
     const groupOpenid = this.normalizeOpenid(e.group_openid || e.group_id, self_id)
@@ -207,22 +211,21 @@ class QQBotIdMap {
       qq_adapter: group?.qq_adapter || userGroup.qq_adapter || user?.qq_adapter || ''
     }
     const mentionMappings = this.getStoredAtMappings(e, self_id, groupOpenid)
-    const mentionsReady = mentionMappings !== false
 
     return {
       user: !!mapping.qq,
       group: !!mapping.group_qq,
-      mentions: mentionsReady,
+      mentions: true,
       mapping: {
         ...mapping,
-        mentions: mentionsReady ? mentionMappings : {}
+        mentions: mentionMappings
       }
     }
   }
 
   static applyStoredMapping (e) {
     const stored = this.getStoredMapping(e)
-    if (stored.user && stored.group && stored.mentions) {
+    if (stored.user && stored.group) {
       this.applyQQMapping(e, stored.mapping)
       return {
         ...stored,
@@ -230,10 +233,113 @@ class QQBotIdMap {
       }
     }
 
+    // Sender / group identity may be new while one of the @ targets already has
+    // a saved QQ mapping. Convert each known target independently.
+    this.applyAtMappings(e, stored.mapping.mentions)
     return {
       ...stored,
-      applied: false
+      applied: Object.keys(stored.mapping.mentions || {}).length > 0
     }
+  }
+
+  /** C2C 使用 user_openid；只接受该 OpenID 的显式映射，不用群 member_openid 猜测身份。 */
+  static getStoredPrivateMapping (e) {
+    this.load()
+    const selfId = String(e.qqbot_self_id || e.qqbot_appid || e.self_id || '')
+    const rawOpenid = e.user_openid || e.raw_sender?.user_openid || e.author?.user_openid
+    if (!selfId || !rawOpenid) return null
+
+    const userOpenid = this.normalizeOpenid(rawOpenid, selfId)
+    const user = this.data.users[selfId]?.[userOpenid]
+    const qq = this.normalizeQQ(user?.qq)
+    const qqSelfId = this.getBoundBotQQ(selfId) || this.normalizeQQ(user?.qq_self_id)
+    if (!qq || !qqSelfId) return null
+
+    return {
+      selfId,
+      userOpenid,
+      user,
+      mapping: {
+        qq,
+        qq_self_id: qqSelfId,
+        qq_adapter: user.qq_adapter || '',
+        nickname: user.nickname || ''
+      }
+    }
+  }
+
+  static async handleQQBotPrivateMessage (e, emit) {
+    if (!this.isPrivateMessage(e) || this.isQQBotSelfMessage(e)) {
+      await emit(e)
+      return true
+    }
+
+    const stored = this.getStoredPrivateMapping(e)
+    if (!stored) {
+      await emit(e)
+      return true
+    }
+
+    const record = this.createRecord(e, 'qqbot', emit)
+    record.userQQ = stored.mapping.qq
+    record.qqSelfId = stored.mapping.qq_self_id
+    this.applyQQMapping(e, stored.mapping)
+    if (!stored.user.c2c) {
+      stored.user.c2c = true
+      stored.user.updated_at = Date.now()
+      this.saveSoon()
+    }
+
+    for (const qq of pendingQQPrivate.values()) {
+      if (this.isSamePrivateMessage(record, qq)) this.clearRecord(qq, pendingQQPrivate)
+    }
+    this.logDebug(stored.selfId, 'QQBot私聊模拟ICQQ data', e)
+    await emit(e)
+    this.rememberQQBotPrivateEmit(record)
+    return true
+  }
+
+  /** 已建立 C2C 映射时等待对应 QQBot 事件，避免双适配器重复执行私聊指令。 */
+  static async handleQQPrivateMessage (e, emit) {
+    if (!this.isPrivateMessage(e) || !this.isNumericQQ(e.user_id) || !this.isNumericQQ(e.self_id) || this.normalizeQQ(e.user_id) === this.normalizeQQ(e.self_id)) return false
+    this.load()
+
+    const selfId = this.normalizeQQ(e.self_id)
+    const userQQ = this.normalizeQQ(e.user_id)
+    const mapped = Object.entries(this.data.users || {}).some(([qqbotSelfId, users]) => {
+      if (Bot?.[qqbotSelfId]?.adapter !== 'QQBot') return false
+      return Object.values(users || {}).some(user =>
+        (user.c2c || !Object.keys(user.groups || {}).length) && this.normalizeQQ(user.qq) === userQQ &&
+        (this.getBoundBotQQ(qqbotSelfId) || this.normalizeQQ(user.qq_self_id)) === selfId
+      )
+    })
+    if (!mapped) return false
+
+    const qq = this.createRecord(e, 'qq', emit)
+    if (this.findMatchedPrivateRecord(qq, recentQQBotPrivate)) return true
+    this.setPending(qq, pendingQQPrivate, async () => await emit(e))
+    return true
+  }
+
+  static isSamePrivateMessage (a, b) {
+    const qqbot = a.source === 'qqbot' ? a : b
+    const qq = a.source === 'qq' ? a : b
+    return !!(qqbot.raw && qqbot.raw === qq.raw && qqbot.time && qq.time &&
+      Math.abs(qqbot.time - qq.time) <= TIME_TOLERANCE &&
+      qqbot.userQQ && qqbot.userQQ === qq.userQQ &&
+      qqbot.qqSelfId && qqbot.qqSelfId === this.normalizeQQ(qq.selfId))
+  }
+
+  static findMatchedPrivateRecord (record, records) {
+    for (const candidate of records.values()) {
+      if (this.isSamePrivateMessage(record, candidate)) return candidate
+    }
+    return null
+  }
+
+  static rememberQQBotPrivateEmit (record) {
+    recentQQBotPrivate.set(record.key, record)
+    setTimeout(() => recentQQBotPrivate.delete(record.key), WAIT_MS * 3)
   }
 
   static async handleQQBotGroupMessage (e, emit) {
@@ -250,7 +356,7 @@ class QQBotIdMap {
     const qqbot = this.createRecord(e, 'qqbot', emit)
     const stored = this.applyStoredMapping(e)
 
-    if (stored.user && stored.group && stored.mentions) {
+    if (stored.user && stored.group) {
       qqbot.userQQ = this.normalizeQQ(e.user_id)
       qqbot.groupQQ = this.normalizeQQ(e.group_id)
       this.clearStoredMappedQQRecords(qqbot)
@@ -376,6 +482,7 @@ class QQBotIdMap {
 
     this.fillICQQIdentityFields(e, { qq, groupQQ, nickname: mapping.nickname })
     this.applyAtMappings(e, mentions)
+    this.removeSelfAtSegment(e)
     this.finalizeICQQMessageFields(e)
     this.attachICQQRuntimeApis(e, { qq, groupQQ, openidGroupId })
     this.cacheBotRoute(e, qq, groupQQ, openidUserId, openidGroupId)
@@ -564,7 +671,11 @@ class QQBotIdMap {
       }
     } else if (qq) {
       const pickedFriend = typeof bot?.pickFriend === 'function' ? bot.pickFriend(qq) : null
-      e.friend = this.mergeApiObject(e.friend, pickedFriend)
+      // 入站 C2C 的 friend 带有 msg_id 被动回复上下文，不能被 QQ 侧
+      // pickFriend 的同名方法覆盖，否则回复会走错适配器。
+      e.friend = this.mergeApiObject(pickedFriend, e.friend)
+      e.friend.user_id = qq
+      e.friend.qqbot_user_id = e.qqbot_user_id || e.openid_user_id
       if (typeof e.friend?.getChatHistory !== 'function') {
         e.friend.getChatHistory = async () => []
       }
@@ -815,7 +926,7 @@ class QQBotIdMap {
         qq_self_id: qq.selfId,
         qq_adapter: qq.event?.adapter || qq.event?.bot?.adapter || ''
       })
-      if (mapping?.qq) ret[this.normalizeMappedOpenid(userOpenid)] = mapping.qq
+      if (mapping?.qq) ret[userOpenid] = mapping.qq
     }
     return ret
   }
@@ -824,12 +935,12 @@ class QQBotIdMap {
     const mentions = {}
     for (const item of this.getAtList(e, 'qqbot')) {
       const userOpenid = this.normalizeOpenid(item.id, self_id)
-      if (!userOpenid) return false
+      if (!userOpenid) continue
 
       const user = this.data.users[self_id]?.[userOpenid]
       const qq = this.normalizeQQ(user?.qq)
-      if (!qq || !user?.groups?.[groupOpenid]) return false
-      mentions[this.normalizeMappedOpenid(userOpenid)] = qq
+      if (!qq || !user?.groups?.[groupOpenid]) continue
+      mentions[userOpenid] = qq
     }
 
     return mentions
@@ -838,11 +949,12 @@ class QQBotIdMap {
   static applyAtMappings (e, mentions = {}) {
     if (!mentions || !Object.keys(mentions).length) return
 
+    const selfId = e.qqbot_self_id || e.qqbot_appid || e.self_id || ''
     if (Array.isArray(e.message)) {
-      e.message = this.convertAtMessage(e.message, mentions)
+      e.message = this.convertAtMessage(e.message, mentions, selfId)
     }
 
-    e.raw_message = this.convertAtText(e.raw_message, mentions)
+    e.raw_message = this.convertAtText(e.raw_message, mentions, selfId)
 
     if (Array.isArray(e.message) && this.hasAtSegment(e.message)) {
       const raw = this.buildRawMessageFromSegments(e.message)
@@ -882,6 +994,37 @@ class QQBotIdMap {
     }
   }
 
+  /**
+   * 机器人 @ 已在 QQBot 入口转换为 atme 标记并用于消息放行。
+   * ICQQ 兼容层只应向插件传递其他人的 @，否则重建 raw_message 时会把机器人本身带回命令文本。
+   */
+  static removeSelfAtSegment (e) {
+    if (!Array.isArray(e.message)) return
+
+    const selfIds = new Set([
+      e.self_id,
+      e.uin,
+      e.self,
+      e.qqbot_self_id,
+      e.qqbot_appid,
+      e.tiny_id,
+      e.data?.self_id,
+      e.bot?.uin,
+      e.bot?.self_id
+    ].map(id => this.normalizeQQ(id)).filter(Boolean).map(String))
+
+    if (!selfIds.size) return
+
+    e.message = e.message.filter(item => {
+      if (item?.type !== 'at') return true
+      const ids = [item.qq, item.id, item.user_id, item.data?.qq, item.data?.id, item.data?.user_id]
+        .map(id => this.normalizeQQ(id))
+        .filter(Boolean)
+        .map(String)
+      return !ids.some(id => selfIds.has(id))
+    })
+  }
+
   static hasAtSegment (message) {
     return Array.isArray(message) && message.some(item => item?.type === 'at')
   }
@@ -910,18 +1053,18 @@ class QQBotIdMap {
       .trim()
   }
 
-  static convertAtMessage (message, mentions) {
+  static convertAtMessage (message, mentions, selfId = '') {
     const ret = []
     for (const item of message) {
       if (item?.type === 'at') {
-        const id = this.normalizeMappedOpenid(item.qq || item.id || item.user_id || item.data?.qq || item.data?.id || item.data?.user_id)
+        const id = this.normalizeOpenid(item.member_openid || item.user_openid || item.qq || item.id || item.user_id || item.data?.member_openid || item.data?.user_openid || item.data?.qq || item.data?.id || item.data?.user_id, selfId)
         const qq = this.normalizeQQ(mentions[id])
         ret.push(qq ? this.normalizeAtSegment({ ...item, qq, id: qq, user_id: qq, text: item.text || '' }, qq) : item)
         continue
       }
 
       if (item?.type === 'text') {
-        ret.push(...this.convertAtTextSegment(item, mentions))
+        ret.push(...this.convertAtTextSegment(item, mentions, selfId))
         continue
       }
 
@@ -930,21 +1073,21 @@ class QQBotIdMap {
     return ret
   }
 
-  static convertAtTextSegment (item, mentions) {
+  static convertAtTextSegment (item, mentions, selfId = '') {
     const text = String(item.text || item.data?.text || '')
-    const parts = this.splitAtText(text, mentions)
+    const parts = this.splitAtText(text, mentions, selfId)
     if (parts.length === 1 && parts[0].type === 'text') return [{ ...item, text: parts[0].text }]
     return parts.map(part => part.type === 'text' ? { type: 'text', text: part.text } : this.normalizeAtSegment({ type: 'at', qq: part.qq, text: '' }, part.qq))
   }
 
-  static splitAtText (text, mentions) {
+  static splitAtText (text, mentions, selfId = '') {
     const ret = []
     const regex = /<@!?([^>]+)>/g
     let lastIndex = 0
     let match
     while ((match = regex.exec(text))) {
       if (match.index > lastIndex) ret.push({ type: 'text', text: text.slice(lastIndex, match.index) })
-      const openid = this.normalizeMappedOpenid(match[1])
+      const openid = this.normalizeOpenid(match[1], selfId)
       const qq = this.normalizeQQ(mentions[openid])
       ret.push(qq ? { type: 'at', qq } : { type: 'text', text: match[0] })
       lastIndex = regex.lastIndex
@@ -953,9 +1096,9 @@ class QQBotIdMap {
     return ret
   }
 
-  static convertAtText (text, mentions) {
+  static convertAtText (text, mentions, selfId = '') {
     if (!text) return text
-    return this.splitAtText(String(text), mentions)
+    return this.splitAtText(String(text), mentions, selfId)
       .map(item => item.type === 'at' ? `@${item.qq}` : item.text)
       .join('')
   }
@@ -1235,7 +1378,7 @@ class QQBotIdMap {
       raw: this.getComparableRaw(e),
       nickname: this.getNickname(e),
       groupName: e.group_name || e.data?.group_name || '',
-      time: Number(e.time || e.timestamp || e.data?.timestamp || 0),
+      time: this.normalizeRecordTime(e.time || e.timestamp || e.data?.timestamp),
       userQQ: this.normalizeQQ(e.user_id),
       groupQQ: this.normalizeQQ(e.group_id),
       userOpenid: e.user_openid || e.member_openid || e.sender?.user_openid || e.sender?.member_openid || e.user_id,
@@ -1243,6 +1386,13 @@ class QQBotIdMap {
       ats: this.getAtList(e, source),
       timer: null
     }
+  }
+
+  static normalizeRecordTime (value) {
+    const number = Number(value)
+    if (Number.isFinite(number) && number > 0) return number > 1e12 ? number / 1000 : number
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed / 1000 : 0
   }
 
   static findMatchedRecord (record, records) {
@@ -1313,13 +1463,10 @@ class QQBotIdMap {
       })
       if (!user?.groups?.[group.group_openid]) return false
 
-      return record.ats.every(item => {
-        const atUser = this.findUserByQQ(group.self_id, item.id, {
-          groupOpenid: group.group_openid,
-          groupQQ: record.groupQQ
-        })
-        return !!atUser?.groups?.[group.group_openid]
-      })
+      // At-target mappings are partial: a converted sender may mention an
+      // unmapped user, and that must not let the corresponding QQ event through
+      // as a duplicate.
+      return true
     })
   }
 
@@ -1348,7 +1495,7 @@ class QQBotIdMap {
     return ret
   }
 
-  static findUserByQQ (self_id, qq, { groupOpenid = '', groupQQ = '' } = {}) {
+  static findUserByQQ (self_id, qq, { groupOpenid = '', groupQQ = '', preferPrivate = false } = {}) {
     this.load()
     const userQQ = this.normalizeQQ(qq)
     if (!userQQ) return null
@@ -1358,6 +1505,10 @@ class QQBotIdMap {
     const currentGroupOpenid = groupOpenid || group?.group_openid || ''
 
     const users = Object.values(this.data.users[self_id] || {}).filter(user => user.qq === userQQ)
+    if (preferPrivate) {
+      return users.find(user => user.c2c) ||
+        users.find(user => !Object.keys(user.groups || {}).length) || null
+    }
     if (currentGroupOpenid) {
       const user = users.find(user => user.groups?.[currentGroupOpenid])
       if (user) return user
@@ -1387,6 +1538,10 @@ class QQBotIdMap {
     return e?.post_type === 'message' && e?.message_type === 'group' && e?.group_id
   }
 
+  static isPrivateMessage (e) {
+    return e?.post_type === 'message' && e?.message_type === 'private' && e?.user_id
+  }
+
   static isQQBotSelfMessage (e) {
     return !!(e?.author?.bot || e?.data?.author?.bot)
   }
@@ -1394,8 +1549,9 @@ class QQBotIdMap {
   static normalizeOpenid (value, self_id) {
     const text = String(value || '').trim()
     if (!text) return ''
-    if (text.startsWith(`${self_id}-`)) return text
-    return `${self_id}-${text.split('-').pop()}`
+    const prefix = self_id ? `${self_id}-` : ''
+    if (prefix && text.startsWith(prefix)) return text
+    return prefix ? `${prefix}${text}` : text
   }
 
   static normalizeQQ (value) {
@@ -1409,17 +1565,18 @@ class QQBotIdMap {
     return !!this.normalizeQQ(value)
   }
 
-  static stripSelfId (value) {
-    const parts = String(value || '').trim().split('-')
-    return parts[1] || parts[0] || ''
+  static stripSelfId (value, self_id = '') {
+    const text = String(value || '').trim()
+    const prefix = self_id ? `${self_id}-` : ''
+    return prefix && text.startsWith(prefix) ? text.slice(prefix.length) : text
   }
 
   static normalizeMappedOpenid (value) {
-    return String(value || '').trim().split('-').pop() || ''
+    return String(value || '').trim()
   }
 
   static isQQBotOpenidText (value) {
-    return /^\d+-[^-\s]+$/.test(String(value || '').trim())
+    return /^\d+-[^\s]+$/.test(String(value || '').trim())
   }
 
   static clonePlain (value) {
@@ -1444,7 +1601,7 @@ class QQBotIdMap {
 
     for (const item of message) {
       if (item?.type === 'at') {
-        const id = item.qq || item.id || item.user_id || item.data?.qq || item.data?.id || item.data?.user_id
+        const id = item.member_openid || item.user_openid || item.qq || item.id || item.user_id || item.data?.member_openid || item.data?.user_openid || item.data?.qq || item.data?.id || item.data?.user_id
         if (id != null) ret.push({ id: String(id), text: String(item.text || item.data?.text || '') })
         continue
       }

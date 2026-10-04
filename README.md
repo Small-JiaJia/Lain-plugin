@@ -1,137 +1,65 @@
-# 这里是一处Lain-Plugin备份仓库，有一定修改
-## 简介
-`Lain-plugin`是一个围绕喵崽`Miao-Yunzai`开发的多适配器插件，让喵崽接入`QQ频道`、`微信`、`shamrock`、`KOOK`等三方平台~，不再局限于ICQQ。
+# Lain-plugin
 
-## 使用
-### 0. 前置：跳过云崽的ICQQ登录
-不想登录ICQQ并继续使用本插件：
+Lain-plugin 是为 [Miao-Yunzai](https://github.com/yoimiya-kokomi/Miao-Yunzai) 提供多平台接入的适配器插件。本仓库在原项目基础上维护了 QQBot API v2、群聊与 C2C 私聊、ICQQ 身份转译和按钮扩展等功能。
 
-- 更新喵崽到最新
-- 打开喵崽的`config/config/bot.yaml`文件将 `skip_login: false` 修改为 `skip_login: true`
-- 如果不存在这个，自行加一行  `skip_login: true` 即可。
+## 安装
 
-### 1.安装插件
+在 `Miao-Yunzai` 根目录执行：
 
-在`Miao-Yunzai`根目录执行
-
-### Gtihub:
-```
-git clone --depth=1 https://github.com/win-syswow64/Lain-plugin ./plugins/Lain-plugin
-```
-
-### 2.安装依赖
-
-```
+```bash
+git clone --depth=1 https://github.com/win-syswow64/Lain-plugin.git ./plugins/Lain-plugin
 pnpm install -P
 ```
 
-### 3.使用适配器
+如果只使用本插件接入机器人，无需登录 ICQQ，可在 `config/config/bot.yaml` 中设置 `skip_login: true`。请先安装并启动所需平台的连接端，再按对应文档配置账号。
 
-请点击查看对应教程~
-PS:LLOneBot地址支持大部分onebot协议,如napcat,ws-plugin,lagrange等
+| 适配器 | 接入说明 |
+| --- | --- |
+| QQBot（QQ群、频道、C2C 私聊） | [QQBot 接入与使用](./docs/QQBot.md) |
+| PC 微信 | [WeChat](./docs/WeChat.md) |
+| 网页版微信 | [WeXin](./docs/WeXin.md) |
+| Shamrock | [Shamrock](./docs/Shamrock.md) |
+| Lagrange.Core | [Lagrange.Core](./docs/Lagrange.Core.md) |
+| LLOneBot、NapCat 等 OneBot 连接端 | 启用反向 WebSocket，地址为 `ws://localhost:2955/LLOneBot`；[LLOneBot 项目](https://github.com/LLOneBot/LLOneBot) |
 
-<details><summary>标准输入</summary><blockquote>
- 作用：在控制台和在QQ一样执行指令，用于无法登录QQ情况下想执行指令。
+插件还包含标准输入、QQ 频道、KOOK、Discord 等适配器。标准输入可在控制台输入 YunZai 指令，默认以主人身份执行；需要自定义状态头像时，将图片放在 `plugins/Lain-plugin/resources/avatar.jpg`。
 
- 直接把`控制台`当成您的QQ`输入指令`即可！
- 
- 主人：`标准输入`默认为主人
+## QQBot 主要功能
 
- 支持大部分基础指令，类似于锅巴登录等，不支持显示图片、适配、语音。
-  
- 自定义椰奶状态头像：在`./plugins/Lain-plugin/resources`文件夹下方创建一个名称为`avatar.jpg`的图片
+- 使用官方 API v2 接入 QQ 群、频道与 C2C 私聊。群消息可订阅“@ 机器人”或全量事件，并保留事件类型供插件判断。
+- 在获得官方接口权限时，查询群接收类型和主动推送状态；发送主动群消息前检查权限。禁言前查询机器人和目标成员身份，权限不足时返回错误。
+- 提供 C2C 收发、文件、撤回、输入状态和流式 Markdown 回复。私聊也可使用 ICQQ 身份转译。
+- 群聊和私聊可使用原生按钮、回调按钮和自定义底部按钮文件；缺少目标插件时跳过其专属按钮。Markdown 中的 `mqqapi://aio/inlinecmd` 会转换为原生输入按钮。
+- 保存 QQ 与 QQBot 的身份映射；混合已映射和未映射用户时仍可转换已知的 @ 目标。
 
- 标准输入文件保存位置` ./resources/stdin `
- </blockquote></details>
+接入指令、配置字段、平台权限及代码示例见 [QQBot 接入与使用](./docs/QQBot.md)。按钮格式、测试指令和自定义文件写法见 [QQBot 按钮使用与开发](./docs/QQBot-Buttons.md)。
 
-- [PC微信](./docs/WeChat.md)
+## 按钮扩展
 
-- [Shamrock](./docs/Shamrock.md)
+已整理的扩展文件位于 `plugins/button/`，每个目标插件对应一个顶层 `.js` 文件。按钮加载器检查 `requiredPlugin`；未安装的插件不会加载其按钮。你可以在该目录新增自己的按钮文件，修改后会热更新。插件回复时，适配器按规则优先级匹配并附加按钮；按钮字段和完整示例请查看[开发文档](./docs/QQBot-Buttons.md)。
 
-- [QQBot(群和频道)](./docs/QQBot.md)
+发送 `#回调按钮测试` 可查看仓库自带的回调按钮示例，点击“测试回调 +1”后会收到确认回复。
 
-- [网页版微信](./docs/WeXin.md)
+## ws-plugin 兼容补丁
 
-- [Lagrange.Core](./docs/Lagrange.Core.md)
+仓库中的 `ws-plugin` 是指向其他仓库的 Git 记录，其工作区改动不会随 Lain-plugin 的提交传递。`patches/ws-plugin-qqbot.patch` 保存了本项目所需的兼容改动：OneBot 的普通发送接口按主动发送处理，避免误用最近消息的被动回复窗口，并补齐文件消息段。需要在独立安装的 `Miao-Yunzai/plugins/ws-plugin` 使用这些改动时，在 `Miao-Yunzai` 根目录运行：
 
-<details><summary>LLOneBot</summary><blockquote>
+```bash
+cd plugins/ws-plugin
+git apply --check ../Lain-plugin/patches/ws-plugin-qqbot.patch
+git apply ../Lain-plugin/patches/ws-plugin-qqbot.patch
+```
 
-  下载安装 [LLOneBot](https://github.com/LLOneBot/LLOneBot)，启用反向 WebSocket，添加地址：
+补丁基于 ws-plugin 提交 `2c814ab2e3897260d15230c4c5512312e0d447e7` 制作；若上游版本不同，先检查补丁是否仍可应用。已应用过补丁的工作区不需重复执行。
 
-  ```
-  ws://localhost:2955/LLOneBot
-  ```
+## 常用指令
 
-</blockquote></details>
-<details><summary>KOOK</summary><blockquote>
- 
- #kook设置+token
- 
- </blockquote></details>
-<details><summary>Discord</summary><blockquote>
- 
- #dc设置+token
- 
- </blockquote></details>
+- `#设置主人`：按控制台验证码设置主人；已有主人可用 `#设置主人@用户` 指定其他主人。
+- `#取消主人@用户` 或 `#删除主人@用户`：移除指定主人。
+- `#铃音更新` 或 `#Lain更新`：更新插件。
 
-### 4.设置主人
+插件可通过 `e.adapter` 或 `Bot[uin].adapter` 判断适配器。常见值包括 `QQBot`、`QQGuild`、`LagrangeCore`、`LLOneBot`、`shamrock`、`ComWeChat`、`WeXin`、`Kook`、`Discord` 和 `stdin`。
 
-- 使用方法
-  - 方法1：发送`#设置主人`，随后复制发送控制台的验证码即可成为主人
-  - 方法2：发送`#设置主人@用户`，需要你是主人的情况下，指定此用户成为主人
+## 致谢
 
-主人可通过`#取消主人@用户`或者`#删除主人@用户`
-
-## 插件更新
-
-- #铃音更新 or #Lain更新
-
-## 如何区分适配器
-
-- `e.adapter` || `Bot[uin].adapter`
-- 标准输入：`stdin`
-- QQ频道：`QQGuild`
-- Shamrock：`shamrock`
-- PC微信：`ComWeChat`
-- QQBot：`QQBot`
-- 网页版微信：`WeXin`
-- LagrangeCore: `LagrangeCore`
-- LLOneBot: `LLOneBot`
-- Kook: `Kook`
-- Discord: `Discord`
-
-## 适配进度
-
-- [ ] 微信公众号适配器
-- [ ] Telegram适配器
-- [x] 标准输入
-- [x] 跳过登录QQ
-- [x] QQ频道适配器
-- [x] PC微信适配器
-- [x] 网页版微信适配器
-- [x] Shamrock适配器
-- [x] QQBot适配器
-- [x] LagrangeCore
-- [x] Kook(该适配器基于Yunzai-Kook-Plugin修改)
-- [x] Discord
-- [x] LLOneBot(XZhouQD贡献代码)
-- [x] 转发消息改发送图片(该方法来源于小叶姐姐的ws-plugin)
-
-## 特别鸣谢
-
-以下排名不分先后
-
-- [Miao-Yunzai](https://github.com/yoimiya-kokomi/Miao-Yunzai)
-- [索引库](https://github.com/yhArcadia/Yunzai-Bot-plugins-index)
-- [OpenShamrock](https://github.com/whitechi73/OpenShamrock)
-- [ComWeChat](https://github.com/JustUndertaker/ComWeChatBotClient)
-- [wechat4u](https://github.com/nodeWechat/wechat4u/blob/master/run-core.js)
-- [qq-group-bot](https://github.com/lc-cn/qq-group-bot)
-- [QQBot按钮库](https://gitee.com/lava081/button)
-- [xiaoye12123](https://gitee.com/xiaoye12123)
-- [Lagrange.Core](https://github.com/LagrangeDev/Lagrange.Core)
-- [LLOneBot](https://github.com/LLOneBot/LLOneBot)
-- [XZhouQD-Lain](https://github.com/XZhouQD/Lain-plugin)
-- [Yunzai-Kook-Plugin](https://github.com/TimeRainStarSky/Yunzai-KOOK-Plugin)
-- [ws-plugin](https://github.com/XasYer/ws-plugin)
-- [discord.js](https://discord.js.org)
+[Miao-Yunzai](https://github.com/yoimiya-kokomi/Miao-Yunzai)、[原 Lain-plugin](https://github.com/Circle-money-run/Lain-plugin)、[QQBot 按钮库](https://gitee.com/lava081/button)、[ws-plugin](https://gitee.com/xiaoye12123/ws-plugin)、[OpenShamrock](https://github.com/whitechi73/OpenShamrock)、[LLOneBot](https://github.com/LLOneBot/LLOneBot)、[Lagrange.Core](https://github.com/LagrangeDev/Lagrange.Core)、[Yunzai-Kook-Plugin](https://github.com/TimeRainStarSky/Yunzai-KOOK-Plugin)、[XZhouQD-Lain](https://github.com/XZhouQD/Lain-plugin) 及其他贡献者。

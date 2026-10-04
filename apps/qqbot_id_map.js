@@ -59,14 +59,17 @@ export class qqbotIdMap extends plugin {
     const match = String(e.msg || e.raw_message || '').match(/^#?绑定qq(\d+)$/i)
     const qq = match?.[1]
     const openid = this.getUserOpenid(e)
+    const selfId = this.getQQBotSelfId(e)
     if (!qq || !openid) return await this.reply('绑定失败，缺少QQ或Openid')
 
     const mapping = QQBotIdMap.bind({
-      self_id: this.getQQBotSelfId(e),
+      self_id: selfId,
       user_openid: openid,
       group_openid: this.getGroupOpenid(e),
       qq,
       group_qq: this.getGroupQQ(e) || '',
+      qq_self_id: QQBotIdMap.getBoundBotQQ(selfId) || '',
+      private: e.message_type === 'private',
       nickname: e.sender?.card || e.sender?.nickname || e.author?.username || ''
     })
     if (!mapping?.saved) return await this.reply('绑定失败，映射配置保存失败')

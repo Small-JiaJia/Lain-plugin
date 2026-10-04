@@ -42,6 +42,7 @@ export class adapter extends plugin {
       token: '',
       sandbox: false,
       allMsg: false,
+      groupAllMsg: false,
       removeAt: false,
       secret: '',
       toCallback: true,
@@ -75,8 +76,10 @@ export class adapter extends plugin {
       config.appid = String(msg[2])
       config.token = msg[3]
       if (msg[4]) config.secret = msg[4]
-      // Optional 5th argument: webhook true/false
+      // Optional 6th field: webhook true/false
       if (msg[5] !== undefined) config.webhook = ['true', '1', 'webhook', 'yes', 'on'].includes(String(msg[5]).toLowerCase())
+      // Optional 7th field: subscribe to GROUP_MESSAGE_CREATE as well as @ events.
+      if (msg[6] !== undefined) config.groupAllMsg = ['true', '1', 'all', 'yes', 'on'].includes(String(msg[6]).toLowerCase())
 
       /** 获取模式 */
       if (/#QQ频道设置/i.test(this.e.msg)) {
@@ -131,19 +134,26 @@ export class adapter extends plugin {
 
     // if (!Array.isArray(token)) token = [token] // 感觉没啥必要。
     if (!token.length) return await this.reply('当前还没有绑定过账号~', true, { at: true })
+    const formatConfig = (label, config) => {
+      let value = `${label}-${config.sandbox ? 1 : 0}:${config.allMsg ? 1 : 0}:${config.appid}:${config.token}`
+      if (config.secret || config.webhook || config.groupAllMsg) value += `:${config.secret || ''}`
+      if (config.webhook || config.groupAllMsg) value += `:${config.webhook ? 'webhook' : '0'}`
+      if (config.groupAllMsg) value += ':1'
+      return value
+    }
     token.forEach(i => {
       switch (Number(i.model)) {
         case 0:
-          list.push(`全量-${i.sandbox ? 1 : 0}:${i.allMsg ? 1 : 0}:${i.appid}:${i.token}` + (i.secret ? `:${i.secret}` : '') + (i.webhook ? ':webhook' : ''))
+          list.push(formatConfig('全量', i))
           break
         case 1:
-          list.push(`QQ频道-${i.sandbox ? 1 : 0}:${i.allMsg ? 1 : 0}:${i.appid}:${i.token}` + (i.secret ? `:${i.secret}` : '') + (i.webhook ? ':webhook' : ''))
+          list.push(formatConfig('QQ频道', i))
           break
         case 2:
-          list.push(`QQ群-${i.sandbox ? 1 : 0}:${i.allMsg ? 1 : 0}:${i.appid}:${i.token}` + (i.secret ? `:${i.secret}` : ''))
+          list.push(formatConfig('QQ群', i))
           break
         default:
-          list.push(`未启用-${i.sandbox ? 1 : 0}:${i.allMsg ? 1 : 0}:${i.appid}:${i.token}` + (i.secret ? `:${i.secret}` : ''))
+          list.push(formatConfig('未启用', i))
           break
       }
     })
