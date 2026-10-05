@@ -2322,13 +2322,30 @@ export default class adapterQQBot {
 
   /** 处理按钮交互事件 */
   async handleInteraction (event) {
+    const interactionType = Number(event.data?.type ?? event.type)
+    // 官方仅要求消息按钮和单聊快捷菜单回调；反馈、授权等互动不是命令。
+    if (Number.isFinite(interactionType) && ![11, 12].includes(interactionType)) return
     const btnId = event.data?.resolved?.button_id
     const btnData = event.data?.resolved?.button_data
-    // 兼容新旧字段: 新版用 operator_openid / group_member_openid
-    const operatorId = event.operator_openid || event.group_member_openid || event.operator_id || event.user_id
+    // SDK 的 ActionNoticeEvent 把 payload.id 存在 notice_id，event_id 是 Gateway 信封 ID。
+    // 官方被动回复需要互动 ID；群、私聊的操作者则由 SDK 存在 operator_id。
+    const interactionId = event.notice_id || event.id
+    const operatorId = event.operator_id || event.user_openid || event.group_member_openid || event.operator_openid || event.user_id
+    const groupId = Bot[this.id]?.callback?.[btnId]?.group_id || event.group_id || event.group_openid
+
+    const acknowledge = async code => {
+      try {
+        const ok = typeof event.reply === 'function'
+          ? await event.reply(code)
+          : await this.sdk.replyAction(interactionId, code)
+        if (ok === false) logger.warn(`QQBot 按钮互动回应失败：${interactionId}`)
+      } catch (error) {
+        logger.error(`QQBot 按钮互动回应失败：${interactionId} ${error?.message || error}`)
+      }
+    }
 
     if (!operatorId) {
-      try { event.reply(1) } catch {}
+      await acknowledge(1)
       return
     }
 
@@ -2342,11 +2359,22 @@ export default class adapterQQBot {
     }
 
     if (!msg) {
-      try { event.reply(1) } catch {}
+      await acknowledge(1)
       return
     }
 
-    try { event.reply(0) } catch {}
+    await acknowledge(0)
+
+    // 回调 data 与用户发来的指令走同一套斜杠、别名前缀处理。
+    msg = String(msg)
+    try {
+      if (this.isSlashToHashEnabled() && (groupId || this.isSlashCommand(msg))) {
+        msg = this.hasAlias(msg, { group_id: groupId ? this.formatQQBotId(groupId) : undefined })
+      }
+      msg = this.normalizeCommandText(msg)
+    } catch (error) {
+      logger.error(`QQBot 按钮命令转换失败：${interactionId} ${error?.message || error}`)
+    }
 
     const data = {
       raw: event,
@@ -2354,13 +2382,24 @@ export default class adapterQQBot {
       self_id: this.id,
       adapter: 'QQBot',
       post_type: 'message',
-      message_type: callback?.group_id ? 'group' : 'private',
+      message_type: groupId ? 'group' : 'private',
+      isGroup: !!groupId,
+      isPrivate: !groupId,
       sub_type: 'callback',
-      message_id: event.event_id ? 'event_' + event.event_id : event.id,
-      time: event.timestamp || Date.now() / 1000,
-      user_id: this.id + '-' + operatorId,
-      group_id: callback?.group_id ? this.id + '-' + callback.group_id : undefined,
-      sender: { user_id: this.id + '-' + operatorId },
+      qqbot_event_type: 'INTERACTION_CREATE',
+      qqbot_event_id: interactionId,
+      message_id: interactionId ? 'event_' + interactionId : undefined,
+      time: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) / 1000 : Date.now() / 1000,
+      user_id: this.formatQQBotId(operatorId),
+      user_openid: groupId ? undefined : operatorId,
+      member_openid: groupId ? operatorId : undefined,
+      group_id: groupId ? this.formatQQBotId(groupId) : undefined,
+      group_openid: groupId || undefined,
+      sender: {
+        user_id: this.formatQQBotId(operatorId),
+        user_openid: groupId ? undefined : operatorId,
+        member_openid: groupId ? operatorId : undefined
+      },
       message: [
         { type: 'text', text: msg },
       ],
@@ -2369,25 +2408,52 @@ export default class adapterQQBot {
       raw_message: msg,
       msg,
       reply: async (replyMsg) => {
-        if (callback?.group_id) {
-          return this.sendGroupMsg(callback.group_id, replyMsg, {
-            eventId: event.event_id || event.id,
-            recvMsgSetting: callback.recv_msg_setting
+        if (groupId) {
+          return this.sendGroupMsg(groupId, replyMsg, {
+            eventId: interactionId,
+            recvMsgSetting: callback?.recv_msg_setting
           })
         } else {
-          return this.sendFriendMsg(operatorId, replyMsg, { eventId: event.event_id || event.id })
+          return this.sendFriendMsg(operatorId, replyMsg, { eventId: interactionId })
         }
       },
     }
 
     if (data.group_id) {
-      data.group = this.pickGroup(callback.group_id)
+      data.group = this.pickGroup(groupId)
       common.mark('Lain-plugin', '群按钮点击: [' + data.group_id + ', ' + data.user_id + '] ' + msg)
     } else {
+      data.friend = this.pickFriend(data.user_id, { eventId: interactionId })
       common.mark('Lain-plugin', '好友按钮点击: [' + data.user_id + '] ' + msg)
     }
 
-    Bot.emit('message', data)
+    data.sendMsg = data.reply
+    // 回调也可能执行调用 e.markdown() 的插件；沿用互动 ID 的被动回复上下文。
+    data.markdown = async (content, options = {}) => {
+      if (!options.buttons && !options.button) {
+        const buttons = await this.button(data)
+        if (buttons?.length) options = { ...options, buttons }
+      }
+      return data.reply(await this.makeMarkdownMessage(data, content, options))
+    }
+    data.replyMarkdown = data.markdown
+    data.sendMarkdown = data.markdown
+
+    try {
+      if (groupId) {
+        QQBotIdMap.applyStoredMapping(data)
+        await Bot.emit('message.group', data)
+      } else {
+        await QQBotIdMap.handleQQBotPrivateMessage(data, async e => {
+          await Bot.emit('message.private', e)
+          await Bot.emit('message', e)
+        })
+        return
+      }
+      await Bot.emit('message', data)
+    } catch (error) {
+      logger.error(`QQBot 按钮命令处理失败：${interactionId} ${error?.stack || error}`)
+    }
   }
 
   // ========== 新版本 Button 构建器 ==========

@@ -79,7 +79,12 @@ export default class Button {
     type = Number(type)
 
     // 确定 data
-    const data = btn.data ?? btn.input ?? btn.callback ?? btn.link ?? ''
+    // action.data 必须与动作类型一致；避免带 data 的网页按钮把命令当 URL 打开。
+    const data = type === 0
+      ? (btn.link ?? btn.data ?? '')
+      : type === 1
+        ? (btn.callback ?? btn.data ?? '')
+        : (btn.input ?? btn.data ?? '')
 
     // 确定 enter
     let enter = btn.send ?? btn.enter
