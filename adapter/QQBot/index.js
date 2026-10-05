@@ -2342,9 +2342,10 @@ export default class adapterQQBot {
     if (Number.isFinite(interactionType) && ![11, 12].includes(interactionType)) return
     const btnId = event.data?.resolved?.button_id
     const btnData = event.data?.resolved?.button_data
-    // SDK 的 ActionNoticeEvent 把 payload.id 存在 notice_id，event_id 是 Gateway 信封 ID。
-    // 官方被动回复需要互动 ID；群、私聊的操作者则由 SDK 存在 operator_id。
+    // SDK 将互动事件体的 d.id 存在 notice_id，Gateway 最外层的 id 存在 event_id。
+    // PUT /interactions 使用前者；群/C2C 被动消息的 event_id 必须使用后者。
     const interactionId = event.notice_id || event.id
+    const replyEventId = event.event_id
     const operatorId = event.operator_id || event.user_openid || event.group_member_openid || event.operator_openid || event.user_id
     const ownCallback = btnId && Bot[this.id]?.callback?.[btnId]
     // 旧消息可能由频道按钮构造器生成；只借用其命令文本，群上下文始终取官方事件。
@@ -2381,6 +2382,12 @@ export default class adapterQQBot {
       return
     }
 
+    if (!replyEventId) {
+      logger.error(`QQBot 按钮回调缺少 Gateway 事件 ID：interaction=${interactionId || ''}`)
+      await acknowledge(1)
+      return
+    }
+
     await acknowledge(0)
 
     // 回调 data 与用户发来的指令走同一套斜杠、别名前缀处理。
@@ -2405,8 +2412,9 @@ export default class adapterQQBot {
       isPrivate: !groupId,
       sub_type: 'callback',
       qqbot_event_type: 'INTERACTION_CREATE',
-      qqbot_event_id: interactionId,
-      message_id: interactionId ? 'event_' + interactionId : undefined,
+      qqbot_event_id: replyEventId,
+      qqbot_interaction_id: interactionId,
+      message_id: 'event_' + replyEventId,
       time: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) / 1000 : Date.now() / 1000,
       user_id: this.formatQQBotId(operatorId),
       user_openid: groupId ? undefined : operatorId,
@@ -2441,11 +2449,11 @@ export default class adapterQQBot {
         }
         if (groupId) {
           return this.sendGroupMsg(groupId, replyMsg, {
-            eventId: interactionId,
+            eventId: replyEventId,
             recvMsgSetting: callback?.recv_msg_setting
           })
         } else {
-          return this.sendFriendMsg(operatorId, replyMsg, { eventId: interactionId })
+          return this.sendFriendMsg(operatorId, replyMsg, { eventId: replyEventId })
         }
       },
     }
@@ -2457,7 +2465,7 @@ export default class adapterQQBot {
       data.group = this.pickGroup(groupId)
       common.mark('Lain-plugin', '群按钮点击: [' + data.group_id + ', ' + data.user_id + '] ' + msg)
     } else {
-      data.friend = this.pickFriend(data.user_id, { eventId: interactionId })
+      data.friend = this.pickFriend(data.user_id, { eventId: replyEventId })
       common.mark('Lain-plugin', '好友按钮点击: [' + data.user_id + '] ' + msg)
     }
 

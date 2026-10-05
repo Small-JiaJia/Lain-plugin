@@ -16,7 +16,7 @@ QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的
 
 `data` 默认作为输入按钮发送，适合执行 YunZai 指令。按钮行最多 5 个按钮，键盘最多 5 行。私聊中的普通指令按钮自动改为回调按钮，点击后用户不会发送聊天消息；群状态接口返回 `recv_msg_setting=all` 时，群内指令按钮也会改为回调，避免客户端自动插入 `@bot`。其他群接收类型保留官方指令按钮行为。显式 `mqqapi://aio/inlinecmd` 保留原生输入动作。回调按钮会生成唯一 ID，并保留原消息所在会话。
 
-回调点击会产生 `INTERACTION_CREATE` 事件。机器人先确认互动，再使用该互动 ID 作为 `event_id` 回复，因此这次发送属于事件被动回复，受官方被动回复时效和次数限制；只有脱离入站消息或互动上下文发送的消息才按主动消息处理。参考 [官方互动事件文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)。
+回调点击会产生 `INTERACTION_CREATE` 事件。机器人先用事件体 `d.id` 确认互动，再用 Gateway 事件最外层的 `id` 作为消息接口的 `event_id` 被动回复。这两个 ID 不可混用，否则消息接口可能返回 `40034025`。该回复受官方被动回复时效和次数限制；脱离入站消息或互动上下文发送的消息按主动消息处理。参考[官方互动事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)和[单聊消息发送接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)。
 
 开启斜杠前缀转换时，按钮命令 `/面板` 会作为 `#面板` 传给插件。想让插件收到字面量 `/面板`，让按钮的 `callback` 或 `data` 实际内容为 `\/面板`；在 JavaScript 源码中写作 `callback: '\\/面板'`。反斜杠在传给插件前会被移除，普通消息也遵循相同规则。
 
