@@ -18,6 +18,8 @@ QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的
 
 回调点击会产生 `INTERACTION_CREATE` 事件。机器人先确认互动，再使用该互动 ID 作为 `event_id` 回复，因此这次发送属于事件被动回复，受官方被动回复时效和次数限制；只有脱离入站消息或互动上下文发送的消息才按主动消息处理。参考 [官方互动事件文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)。
 
+开启斜杠前缀转换时，按钮命令 `/面板` 会作为 `#面板` 传给插件。想让插件收到字面量 `/面板`，让按钮的 `callback` 或 `data` 实际内容为 `\/面板`；在 JavaScript 源码中写作 `callback: '\\/面板'`。反斜杠在传给插件前会被移除，普通消息也遵循相同规则。
+
 ## 在插件代码中添加按钮
 
 ### `Bot.Button()`

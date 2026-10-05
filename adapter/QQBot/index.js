@@ -1127,8 +1127,12 @@ export default class adapterQQBot {
         }
         return false
       })
-      this.normalizeIncomingMessage(e, tinyId)
     }
+    // 同步消息段与 raw_message。否则装载器重建 e.msg 时会再次拼入未反转义的文本。
+    for (const item of e.message) {
+      if (item?.type === 'text') item.text = this.normalizeCommandText(item.text)
+    }
+    this.normalizeIncomingMessage(e, tinyId)
     this.defineIncomingMsg(e)
     // 先用 ref_msg_idx 恢复被引用消息的真实 message_id，再缓存当前消息的
     // msg_idx → message_id 映射，供后续引用、撤回和历史消息查询使用。
@@ -1361,7 +1365,10 @@ export default class adapterQQBot {
   }
 
   normalizeCommandText(text) {
-    return String(text || '').replace(/(^|\s)＃(?=\S)/g, '$1#')
+    return String(text || '')
+      .replace(/(^|\s)＃(?=\S)/g, '$1#')
+      // 显式反转义：\/命令保留为 /命令，不参与斜杠前缀转换。
+      .replace(/^(\s*(?:<@!?[^>]+>\s*)?)\\(?=[\/／])/, '$1')
   }
 
   collapseRepeatedCommandText(text) {
@@ -2442,6 +2449,9 @@ export default class adapterQQBot {
         }
       },
     }
+
+    // YunZai 装载器会将 text 段再次拼入 e.msg；与普通入站消息使用同一赋值器去重。
+    this.defineIncomingMsg(data)
 
     if (data.group_id) {
       data.group = this.pickGroup(groupId)
