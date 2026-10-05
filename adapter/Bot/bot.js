@@ -455,6 +455,24 @@ Bot.Button = function (list, line = 3) {
       if (i.QQBot.action) Object.assign(button.action, i.QQBot.action)
     }
 
+    // 给 QQBot 适配器保留“点击后继续填写”的内部标记；使用不可枚举属性，
+    // 不会被序列化到官方 keyboard 请求，也不会影响其他适配器。
+    const requiresInput = [
+      i.requiresInput,
+      i.requires_input,
+      i.inputOnly,
+      i.input_only,
+      i.keepInput,
+      i.keep_input
+    ].find(value => value !== undefined)
+    if (requiresInput !== undefined) {
+      Object.defineProperty(button, '_lainRequiresInput', {
+        value: !!requiresInput,
+        enumerable: false,
+        configurable: true
+      })
+    }
+
     return button
   }
 

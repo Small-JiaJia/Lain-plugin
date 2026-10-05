@@ -104,7 +104,7 @@ export default class Button {
       }
     }
 
-    return {
+    const button = {
       id: String(id),
       render_data: {
         label,
@@ -119,6 +119,24 @@ export default class Button {
         unsupport_tips: btn.tips ?? '暂不支持此按钮'
       }
     }
+
+    const requiresInput = [
+      btn.requiresInput,
+      btn.requires_input,
+      btn.inputOnly,
+      btn.input_only,
+      btn.keepInput,
+      btn.keep_input
+    ].find(value => value !== undefined)
+    if (requiresInput !== undefined) {
+      Object.defineProperty(button, '_lainRequiresInput', {
+        value: !!requiresInput,
+        enumerable: false,
+        configurable: true
+      })
+    }
+
+    return button
   }
 
   /**

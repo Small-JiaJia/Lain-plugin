@@ -1797,6 +1797,7 @@ export default class adapterQQBot {
           const inlineCommand = Number(btn.action.type) === 0
             ? this.parseMqqapiInlineCommand(btn.action.data)
             : null
+          const requiresInput = this.isInputRequiredButton(btn)
           if (inlineCommand) {
             buttons.push(this.normalizeConversationButtonAction(e, {
               ...btn,
@@ -1806,12 +1807,18 @@ export default class adapterQQBot {
                 data: inlineCommand.command,
                 enter: inlineCommand.enter
               }
-            }, true))
+            }, true, false))
           } else {
-            buttons.push(this.normalizeConversationButtonAction(e, btn, !!btn.inlineCommand))
+            buttons.push(this.normalizeConversationButtonAction(
+              e,
+              btn,
+              !!btn.inlineCommand || requiresInput,
+              requiresInput
+            ))
           }
         } else {
           const inlineCommand = btn.link ? this.parseMqqapiInlineCommand(btn.link) : null
+          const requiresInput = this.isInputRequiredButton(btn)
           const built = this.buildButton(e, {
             text: btn.text ?? btn.label ?? btn.data ?? btn.input ?? btn.callback ?? btn.link ?? '',
             clicked_text: btn.clicked_text ?? btn.visited_label,
@@ -1823,8 +1830,15 @@ export default class adapterQQBot {
             style: btn.style,
             tips: btn.tips ?? btn.unsupport_tips,
             QQBot: btn.QQBot,
-          }, buttons.length % 2, !!(inlineCommand || btn.inlineCommand))
-          if (built) buttons.push(this.normalizeConversationButtonAction(e, built, !!(inlineCommand || btn.inlineCommand)))
+          }, buttons.length % 2, !!(inlineCommand || btn.inlineCommand), requiresInput)
+          if (built) {
+            buttons.push(this.normalizeConversationButtonAction(
+              e,
+              built,
+              !!(inlineCommand || btn.inlineCommand || requiresInput),
+              requiresInput
+            ))
+          }
         }
         if (buttons.length >= 5) {
           result.push({ buttons: buttons.splice(0, 5) })
@@ -2506,7 +2520,8 @@ export default class adapterQQBot {
    * action type: 0=link, 1=callback, 2=input
    * permission: 'all'(默认) | 'admin' | ['uid1', 'uid2']
    */
-  buildButton (e, btn, style = 0, preserveInput = false) {
+  buildButton (e, btn, style = 0, preserveInput = false, requiresInput) {
+    const keepInput = requiresInput ?? this.isInputRequiredButton(btn)
     const id = 'bt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
     const msg = {
       id,
@@ -2523,12 +2538,22 @@ export default class adapterQQBot {
         type: 2,
         permission: { type: 2 },
         data: btn.input,
-        enter: !!btn.send,
+        enter: keepInput ? false : !!btn.send,
         unsupport_tips: btn.tips || '暂不支持此按钮',
         ...(btn.QQBot?.action || {}),
       }
     } else if (btn.callback) {
-      if (this.config.toCallback !== false) {
+      if (keepInput) {
+        msg.action = {
+          type: 2,
+          permission: { type: 2 },
+          data: btn.callback,
+          enter: false,
+          reply: false,
+          unsupport_tips: btn.tips || '暂不支持此按钮',
+          ...(btn.QQBot?.action || {}),
+        }
+      } else if (this.config.toCallback !== false) {
         msg.action = {
           type: 1,
           permission: { type: 2 },
@@ -2573,11 +2598,72 @@ export default class adapterQQBot {
       }
     }
 
-    return this.normalizeConversationButtonAction(e, msg, preserveInput)
+    return this.normalizeConversationButtonAction(e, msg, preserveInput || keepInput, keepInput)
+  }
+
+  /** 判断需要用户继续填写内容的按钮，避免被转换成点击即执行的回调。 */
+  isInputRequiredButton (button) {
+    const action = button?.action || button || {}
+    const explicit = [
+      button?._lainRequiresInput,
+      button?.requiresInput,
+      button?.requires_input,
+      button?.inputOnly,
+      button?.input_only,
+      button?.keepInput,
+      button?.keep_input,
+      action?.requiresInput,
+      action?.requires_input,
+      action?.inputOnly,
+      action?.input_only
+    ].find(value => value !== undefined)
+    if (explicit !== undefined) return !!explicit
+
+    const inferredType = button?.link
+      ? 0
+      : button?.callback
+        ? 1
+        : (button?.input !== undefined || button?.data !== undefined ? 2 : undefined)
+    const type = Number(action.type ?? button?.type ?? inferredType)
+    if (![1, 2].includes(type)) return false
+
+    const label = String(button?.render_data?.label ?? button?.label ?? button?.text ?? '').trim()
+    const data = String(action.data ?? button?.data ?? button?.input ?? button?.callback ?? '').trim()
+    const text = `${label} ${data}`.replace(/\s+/g, '')
+    if (!text) return false
+
+    // 扫码/帮助类按钮本身不需要用户再填写参数。
+    if (/(扫码|二维码|绑定帮助|登录帮助|教程|说明)/i.test(text)) return false
+
+    // 常见需要继续输入 UID、账号或角色的入口。保留“语音接口切换”“换一批”等无需输入的操作，
+    // 对其他不确定场景可使用 requiresInput: true 显式标记。
+    return /(?:绑定(?:uid|账号|账户)?|切换(?:uid|账号|账户|角色|面板)|(?:删除|解绑)uid|(?:登录|登陆)(?:uid|账号|账户)|(?:账号|账户)(?:登录|登陆))/i.test(text) ||
+      /(?:面板|角色).*(?:更换|换)|(?:更换|换)(?:面板|角色)/i.test(text) ||
+      /[^换\s]{2,}换[^换\s]{1,}/i.test(text)
   }
 
   /** 私聊和全量接收群的普通指令按钮使用回调，避免客户端发送指令或自动插入 @bot。 */
-  normalizeConversationButtonAction (e, button, preserveInput = false) {
+  normalizeConversationButtonAction (e, button, preserveInput = false, requiresInput) {
+    const keepInput = requiresInput ?? this.isInputRequiredButton(button)
+    const actionType = Number(button?.action?.type)
+    if (keepInput && [1, 2].includes(actionType)) {
+      const normalized = {
+        ...button,
+        action: {
+          ...button.action,
+          type: 2,
+          enter: false,
+          reply: false
+        }
+      }
+      Object.defineProperty(normalized, '_lainRequiresInput', {
+        value: true,
+        enumerable: false,
+        configurable: true
+      })
+      return normalized
+    }
+
     const convert = !preserveInput && Number(button?.action?.type) === 2 &&
       (!e?.group_id || e.qqbot_recv_msg_setting === 'all')
     if (!convert && Number(button?.action?.type) !== 1) return button

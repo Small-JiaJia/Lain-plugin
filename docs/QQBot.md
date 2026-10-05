@@ -39,6 +39,42 @@
 
 凭证会写入 Lain-plugin 的 `config/token.yaml`。该文件包含密钥，请勿提交到公开仓库或粘贴到公开聊天中。
 
+## 连接方式与高级配置
+
+默认使用 WebSocket 长连接。若要使用 QQ 开放平台的 WebHook，在配置的第 6 个字段填入 `webhook`（也接受 `1`、`yes` 或 `on`）：
+
+```text
+#QQ群设置 0:1:你的AppID::你的AppSecret:webhook
+```
+
+WebHook 模式不启动 WebSocket，只保留 Access Token 刷新和 HTTP 事件接收。将 QQ 开放平台的回调地址指向实例的公开地址加 `/QQBot`，并确保反向代理保留 `X-Bot-Appid` 请求头；URL 验证和事件分发由适配器处理。公开部署时必须填写正确的 `AppSecret`，并只将 `/QQBot` 暴露给可信的回调入口。
+
+设置命令中各字段的含义如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| 1 | 沙盒开关：`1` 开启，`0` 关闭 |
+| 2 | 频道私域/公域模式：`1` 私域，`0` 公域；不代表QQ群全量消息 |
+| 3 | `AppID` |
+| 4 | 旧版 Token 占位字段，当前鉴权不再使用 |
+| 5 | `AppSecret` |
+| 6 | WebHook 开关；不用 WebHook 时填 `0` |
+| 7 | 群全量消息开关；填 `1` 后额外订阅 `GROUP_MESSAGE_CREATE` |
+
+也可以在 `config/token.yaml` 对已创建的账号设置高级选项，修改后重启生效：
+
+```yaml
+token:
+  "你的AppID":
+    maxRetry: 10       # WebSocket 连续失败重试次数；0 表示不限次数
+    timeout: 10000     # OpenAPI 和文件分片请求超时，单位毫秒
+    toCallback: true   # callback 按钮是否转换为 interaction
+    other:
+      Prefix: true     # 将 /命令转换为 #命令
+```
+
+`groupAllMsg` 只控制QQ群是否订阅全量消息；`allMsg` 控制的是频道消息范围。两者不要混用。
+
 ## 消息、Markdown 与媒体
 
 QQBot v2 的文本通过 Markdown 内容发送。适配器支持 `e.reply()`、`e.markdown()` 和 `e.replyMarkdown()`；Markdown 无需配置旧版模板 ID。旧的 `#QQBot设置MD` 配置入口已经废弃。
@@ -71,6 +107,23 @@ QQBot 将 `GROUP_AT_MESSAGE_CREATE`（群 @ 机器人）和 `GROUP_MESSAGE_CREAT
 群 @ 事件自身已经表示“@ 机器人”。适配器会从供插件使用的 `e.message` 中移除机器人自己的 at 段，避免 ICQQ 兼容层再次将它识别成普通 @ 目标；消息正文、`e.atme` 和其他用户的 at 段仍然保留。全量消息不设置 `e.atme`，除非消息内容确实包含机器人 mention。
 
 只有开放平台授予全量群消息权限后，`groupAllMsg` 配置才能收到全量事件。不开启该选项时仍接收群 @ 机器人消息。
+
+### 事件字段速查
+
+QQBot 事件会保留官方 OpenID，同时把未完成映射的 ID 格式化为 `<AppID>-<OpenID>`，便于多个 QQBot 账号共存。常用字段如下：
+
+| 字段 | 说明 |
+| --- | --- |
+| `e.qqbot_event_type` | 原始 Gateway 事件名，如 `GROUP_AT_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` 或 `C2C_MESSAGE_CREATE` |
+| `e.qqbot_event_id` | 官方事件 ID；回调按钮消息中是 Gateway 信封最外层的 `id`，可用于被动回复 |
+| `e.qqbot_interaction_id` | 仅回调按钮存在，对应互动事件体 `d.id`，只用于确认 interaction |
+| `e.qqbot_is_group_at` / `e.qqbot_is_group_all` | 是否来自群 @ 事件或群全量事件 |
+| `e.qqbot_recv_msg_setting` | 群接收范围：`all`、`only_mention` 或 `mention_and_context` |
+| `e.qqbot_allow_proactive_msg` | 当前群是否允许主动发消息 |
+| `e.qqbot_group_state_error` | 查询群状态失败时的错误文本 |
+| `e.user_openid` / `e.member_openid` / `e.group_openid` | 官方 C2C 用户、群成员和群 OpenID |
+
+群 @ 事件已经表达了“机器人被调用”，所以适配器会设置 `e.atme=true` 并从供插件使用的 `e.message` 移除机器人自己的 at 段；其他用户的 at 段仍然保留。回调按钮同样设置 `atme=true`，但不会伪造机器人 at 消息段。
 
 ## C2C 私聊 API
 
@@ -110,6 +163,16 @@ C2C 主要接口和行为：
 - 私聊被动回复窗口为 60 分钟，每条入站消息最多被动回复 4 次。主动发送受平台频率、用户设置和机器人权限限制；消息类型、权限及限制请以官方发送消息文档为准。
 
 流式协议和输入状态通知由 QQ 官方 Node SDK 的当前实现提供参考；如平台修改字段或限制，请以 [官方 C2C 消息 API 文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)、[官方单聊事件文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)、[官方流式会话实现](https://github.com/tencent-connect/qqbot-nodejs/blob/main/src/streaming.ts) 与 [腾讯 QQBot Node.js SDK](https://github.com/tencent-connect/qqbot-nodejs) 为准。
+
+## 消息引用、缓存与撤回
+
+适配器会把带有官方 `msg_idx` 和消息 ID 的入站消息写入 Redis，缓存时间为 12 小时。以下接口优先读取这份缓存：
+
+- `Bot[appid].getMsg(messageId)`；
+- `e.group.getMsg(messageId)`、`e.friend.getMsg(messageId)`；
+- `e.group.getChatHistory(messageId, num)`、`e.friend.getChatHistory(messageId, num)`。
+
+QQ 官方暂未提供可等价替代的历史消息接口，因此 `getChatHistory` 目前只会返回命中的锚点消息，不会拉取完整历史。`e.recall()`、`e.group.recallMsg()` 和 `e.friend.recallMsg()` 可撤回对应消息；引用消息的 `ref_msg_idx` 会在缓存命中后恢复为真实消息 ID。Redis 不可用时不影响正常收发，但跨进程的引用和缓存查询可能失败。
 
 ## QQ 与 QQBot 用户映射
 
@@ -167,7 +230,24 @@ await group.approveJoinRequest('成员 OpenID', true, {
 #QQBot审批入群申请 <群OpenID> <成员OpenID> <同意|拒绝> [申请ID] [理由]
 ```
 
-自动审批策略支持创建、查询、更新、执行和删除；执行后会异步扫描关联群的申请。详细参数可查看适配器 API 实现或 QQ 机器人官方群管理文档。
+拒绝申请时，可在理由中加入 `--拉黑`，同时把成员加入群黑名单；只有拒绝操作支持该选项。命令也兼容 `#QQ群加群申请...` 和 `#QQBot处理入群申请...` 形式。
+
+适配器还暴露自动审批策略 API，供插件直接调用：
+
+```js
+const bot = Bot['机器人 AppID']
+await bot.getJoinApprovalStrategies({ limit: 20 })
+const strategy = await bot.createJoinApprovalStrategy({
+  group_openids: ['群 OpenID'],
+  whitelist_users: ['QQ号']
+})
+await bot.updateJoinApprovalWhitelist(strategy.strategy_id, 'add', ['另一个QQ号'])
+await bot.executeJoinApprovalStrategy(strategy.strategy_id)
+await bot.updateJoinApprovalStrategy(strategy.strategy_id, { enable: true })
+await bot.deleteJoinApprovalStrategy(strategy.strategy_id)
+```
+
+创建策略时 `group_openids` 与 `group_ids` 必须二选一，最多关联 100 个群；白名单单次最多 10000 个 QQ 号。执行后会异步扫描关联群的申请。
 
 `/bot_state` 和成员详情接口在官方文档中标注为白名单或内邀能力。若尚未获得权限，适配器会报告原始 API 错误并阻止禁言及主动发送；需在 QQ 开放平台申请相应权限。可查看[机器人群内状态](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html)、[群成员详情](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)、[设置成员禁言](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_restrict_chat_setting.post.html)及[群消息发送](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)。
 

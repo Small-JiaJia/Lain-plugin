@@ -11,6 +11,9 @@ class Button {
   constructor () {
     this.plugin = pluginRoot + '/plugins'
     this.botModules = []
+    this.buttonWatcher = null
+    this.buttonParentWatcher = null
+    this.buttonReloading = new Map()
     this.initialize()
   }
 
@@ -136,50 +139,128 @@ class Button {
         return watcher
       })
 
-      /** plugins/button/ 独立按钮插件目录热更新 */
-      const buttonDir = this.plugin + '/button'
-      if (fs.existsSync(buttonDir)) {
-        /** 初始加载 */
-        const btnFiles = fs.readdirSync(buttonDir).filter(f => f.endsWith('.js'))
-        for (const file of btnFiles) {
-          const relPath = 'plugins/button/' + file
-          this.unloadModule(relPath)
-          if (await this.loadModule(relPath)) logger.mark(`[Lain-plugin][加载按钮插件][${relPath}]`)
-        }
-        /** 监听 button 目录变化 */
-        const btnWatcher = chokidar.watch(buttonDir, {
-          ignored: /[\/\\]\./,
-          persistent: true,
-          ignoreInitial: true
-        })
-        btnWatcher
-          .on('add', async filePath => {
-            const file = filePath.split('/').pop()
-            if (!file.endsWith('.js')) return
-            const relPath = 'plugins/button/' + file
-            this.unloadModule(relPath)
-            if (await this.loadModule(relPath)) logger.mark(`[Lain-plugin][新增按钮插件][${relPath}]`)
-          })
-          .on('change', async filePath => {
-            const file = filePath.split('/').pop()
-            if (!file.endsWith('.js')) return
-            const relPath = 'plugins/button/' + file
-            this.unloadModule(relPath)
-            if (await this.loadModule(relPath)) logger.mark(`[Lain-plugin][热更新按钮插件][${relPath}]`)
-          })
-          .on('unlink', async filePath => {
-            const file = filePath.split('/').pop()
-            if (!file.endsWith('.js')) return
-            const relPath = 'plugins/button/' + file
-            this.unloadModule(relPath)
-            logger.mark(`[Lain-plugin][卸载按钮插件][${relPath}]`)
-          })
-      }
+      // button 目录可能在启动后才创建；父目录 watcher 负责发现它，目录 watcher
+      // 负责文件新增、修改和删除。路径统一转换为 plugins/button/<file>，避免
+      // Windows 下 chokidar 返回反斜杠路径导致 unload/load 使用的 key 不一致。
+      await this.watchButtonDirectory()
+      this.watchButtonDirectoryParent()
 
       return this.botModules
     } catch (error) {
       logger.error(`读取插件目录时出错：${error.message}`)
     }
+  }
+
+  normalizeFilePath (filePath) {
+    return String(filePath || '').replace(/\\/g, '/')
+  }
+
+  samePath (left, right) {
+    return path.resolve(left) === path.resolve(right)
+  }
+
+  /** 只接受 button 目录顶层 JS 文件，并返回模块列表使用的稳定路径。 */
+  getButtonRelativePath (filePath) {
+    const buttonDir = path.resolve(this.plugin, 'button')
+    const normalized = this.normalizeFilePath(filePath)
+    const absolute = path.isAbsolute(normalized)
+      ? path.resolve(normalized)
+      : path.resolve(pluginRoot, normalized)
+    const relative = path.relative(buttonDir, absolute)
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return ''
+    if (relative.includes(path.sep) || !relative.toLowerCase().endsWith('.js')) return ''
+    return `plugins/button/${this.normalizeFilePath(relative)}`
+  }
+
+  /** 串行处理同一个文件的快速连续 change 事件，避免旧模块覆盖新模块。 */
+  async reloadButtonFile (filePath, eventType) {
+    const relPath = this.getButtonRelativePath(filePath)
+    if (!relPath) return false
+
+    const previous = this.buttonReloading.get(relPath) || Promise.resolve()
+    const task = previous.catch(() => {}).then(async () => {
+      if (eventType === 'unlink') {
+        this.unloadModule(relPath)
+        logger.mark(`[Lain-plugin][卸载按钮插件][${relPath}]`)
+        return true
+      }
+
+      this.unloadModule(relPath)
+      const loaded = await this.loadModule(relPath)
+      if (loaded) {
+        const label = eventType === 'add' ? '新增' : '热更新'
+        logger.mark(`[Lain-plugin][${label}按钮插件][${relPath}]`)
+      }
+      return !!loaded
+    })
+    this.buttonReloading.set(relPath, task)
+
+    try {
+      return await task
+    } catch (error) {
+      logger.error(`[Lain-plugin][按钮插件${eventType}失败][${relPath}] ${error?.stack || error}`)
+      return false
+    } finally {
+      if (this.buttonReloading.get(relPath) === task) this.buttonReloading.delete(relPath)
+    }
+  }
+
+  async watchButtonDirectory (buttonDir = path.resolve(this.plugin, 'button')) {
+    if (this.buttonWatcher || !fs.existsSync(buttonDir)) return false
+
+    try {
+      if (!fs.statSync(buttonDir).isDirectory()) return false
+    } catch {
+      return false
+    }
+
+    const btnFiles = fs.readdirSync(buttonDir).filter(file => file.toLowerCase().endsWith('.js'))
+    for (const file of btnFiles) {
+      await this.reloadButtonFile(path.join(buttonDir, file), 'add')
+    }
+
+    this.buttonWatcher = chokidar.watch(buttonDir, {
+      ignored: /[\/\\]\./,
+      persistent: true,
+      ignoreInitial: true
+    })
+      .on('add', filePath => this.reloadButtonFile(filePath, 'add'))
+      .on('change', filePath => this.reloadButtonFile(filePath, 'change'))
+      .on('unlink', filePath => this.reloadButtonFile(filePath, 'unlink'))
+      .on('unlinkDir', filePath => {
+        if (this.samePath(filePath, buttonDir)) {
+          this.buttonWatcher?.close()
+          this.buttonWatcher = null
+        }
+      })
+      .on('error', error => logger.error(`[Lain-plugin][按钮目录监听失败] ${error?.message || error}`))
+
+    return true
+  }
+
+  watchButtonDirectoryParent () {
+    if (this.buttonParentWatcher) return
+    const buttonDir = path.resolve(this.plugin, 'button')
+    this.buttonParentWatcher = chokidar.watch(this.plugin, {
+      ignored: /[\/\\]\./,
+      persistent: true,
+      ignoreInitial: true,
+      depth: 1
+    })
+      .on('addDir', filePath => {
+        if (this.samePath(filePath, buttonDir)) {
+          this.watchButtonDirectory(buttonDir).catch(error => {
+            logger.error(`[Lain-plugin][按钮目录加载失败] ${error?.stack || error}`)
+          })
+        }
+      })
+      .on('unlinkDir', filePath => {
+        if (this.samePath(filePath, buttonDir)) {
+          this.buttonWatcher?.close()
+          this.buttonWatcher = null
+        }
+      })
+      .on('error', error => logger.error(`[Lain-plugin][按钮父目录监听失败] ${error?.message || error}`))
   }
 }
 

@@ -1,3 +1,12 @@
+## [Unreleased] (2026-10-05)
+
+### QQBot
+
+* 完善 QQBot API v2 的 C2C 私聊、文件上传、撤回、输入状态、流式 Markdown、群状态和群管理能力。
+* 新增群全量消息订阅、WebHook 接入、消息引用缓存、QQ/OpenID 身份映射和按钮扩展支持。
+* 修复群聊、C2C 私聊与频道按钮互动的场景分流、重复回调、斜杠命令转义及被动回复事件 ID 使用问题。
+* 修复需要用户继续输入参数的按钮被立即执行，并修复 `plugins/button` 按钮模块的跨平台热加载、动态创建和快速连续修改。
+
 ## [1.5.6](https://gitee.com/lylnspace/Lain-plugin/commits/master) (2024-07-18)
 
 ### Fix
