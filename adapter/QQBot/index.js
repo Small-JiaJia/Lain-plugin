@@ -485,13 +485,15 @@ export default class adapterQQBot {
    * QQ 官方接口要求机器人是群管理员，且仅能操作普通成员。
    */
   async setGroupMemberMute (groupId, userId, duration) {
-    const member = this.createMemberMuteOperation(userId, duration)
-    return await this.setGroupMemberMutes(groupId, [member])
+    // 以兼容 ICQQ/OneBot 的输入形式交给批量入口，避免在 bot_state、
+    // QQ 号映射等网络/异步操作之前就计算 mute_expire_at。
+    return await this.setGroupMemberMutes(groupId, [{ user_id: userId, duration }])
   }
 
   /**
    * 批量设置群成员禁言。members 的元素为 { member_openid, op, mute_expire_at }；
    * 也兼容 { user_id, duration }，方便适配 OneBot 的禁言调用。
+   * 不调用官方尚在内邀阶段的群成员详情接口做前置校验，成员权限由禁言接口判定。
    */
   async setGroupMemberMutes (groupId, members) {
     if (!Array.isArray(members) || !members.length) {
@@ -506,36 +508,48 @@ export default class adapterQQBot {
     if (!['admin', 'owner'].includes(state.member_role)) {
       throw new Error(`QQBot 设置群成员禁言失败：机器人在群内身份为 ${state.member_role}，需要群管理员权限`)
     }
-    const normalized = await Promise.all(members.map(async member => {
+    // 禁言兼容 ICQQ/OneBot 的数字 QQ 号。把当前群上下文传给映射表，
+    // 同一个 QQ 号在多个群存在不同 OpenID 时也能选中当前群成员。
+    const memberResolveContext = {
+      self_id: this.id,
+      qqbot_self_id: this.id,
+      qqbot_appid: this.id,
+      bot: Bot[this.id],
+      group_id: groupId,
+      group_openid: groupOpenid,
+      openid_group_id: groupOpenid,
+      message_type: 'group'
+    }
+    const resolvedMembers = await Promise.all(members.map(async member => {
       let operation
+      let memberId
+      let duration
       if (member?.member_openid && member?.op) {
         operation = {
           op: this.normalizeMemberMuteOp(member.op),
           member_openid: member.member_openid,
           mute_expire_at: member.mute_expire_at ?? ''
         }
+        memberId = operation.member_openid
       } else {
-        operation = this.createMemberMuteOperation(member?.user_id ?? member?.userId, member?.duration ?? member?.time)
+        memberId = member?.user_id ?? member?.userId
+        duration = member?.duration ?? member?.time
       }
-      const memberOpenid = await this.resolveOpenid(operation.member_openid, 'user')
-      let info
-      try {
-        const response = await this.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/members/${encodeURIComponent(memberOpenid)}`)
-        info = response.data
-      } catch (error) {
-        throw new Error(`QQBot 设置群成员禁言失败：无法验证成员 ${memberOpenid} 的权限：${error.message || error}`)
-      }
-      if (!info?.member_role || info.bot) {
-        throw new Error(`QQBot 设置群成员禁言失败：无法确认成员 ${memberOpenid} 是普通群成员`)
-      }
-      if (info.member_role !== 'member') {
-        throw new Error(`QQBot 设置群成员禁言失败：成员 ${memberOpenid} 是 ${info.member_role}，只能操作普通群成员`)
-      }
+      const memberOpenid = await this.resolveOpenid(memberId, 'user', memberResolveContext)
       return {
-        ...operation,
-        member_openid: memberOpenid
+        memberOpenid,
+        operation,
+        duration
       }
     }))
+
+    // 所有权限检查和 ID 映射完成后再计算相对时长，避免网络耗时被计入禁言时间。
+    const normalized = resolvedMembers.map(({ memberOpenid, operation, duration }) => operation
+      ? { ...operation, member_openid: memberOpenid }
+      : {
+          ...this.createMemberMuteOperation(memberOpenid, duration),
+          member_openid: memberOpenid
+        })
 
     const { data } = await this.sdk.request.post(
       `/v2/groups/${encodeURIComponent(groupOpenid)}/restrict_chat_setting`,
@@ -717,25 +731,59 @@ export default class adapterQQBot {
    * 数字 QQ 号会通过映射表查询；官方 OpenID 仅移除本机器人添加的前缀，
    * 避免错误截断 OpenID 中可能存在的连字符。
    */
-  async resolveOpenid (id, type) {
+  async resolveOpenid (id, type, context = {}) {
     let openid = String(id ?? '').trim()
     if (!openid) throw new Error(`QQBot 缺少${type === 'group' ? '群' : '用户'} OpenID`)
 
     const prefix = `${this.id}-`
-    if (openid.startsWith(prefix)) return openid.slice(prefix.length)
+    if (openid.startsWith(prefix)) {
+      const unprefixed = openid.slice(prefix.length)
+      if (!/^\d+$/.test(unprefixed)) return unprefixed
+      openid = unprefixed
+    }
 
     // 非纯数字 ID 已是官方 OpenID，不应交由 QQ 号映射表再次转换。
-    if (/^\d+$/.test(openid) && Bot.QQToOpenid) {
-      try {
-        const resolved = await Bot.QQToOpenid(openid, { bot: Bot[this.id], self_id: this.id }, type)
-        if (resolved) openid = String(resolved).trim()
-      } catch {
-        // 映射不存在时仍可使用消息事件中携带的原始 OpenID。
+    if (/^\d+$/.test(openid)) {
+      const resolveEvent = {
+        ...context,
+        bot: context.bot || Bot[this.id],
+        self_id: context.self_id || this.id,
+        qqbot_self_id: context.qqbot_self_id || this.id,
+        qqbot_appid: context.qqbot_appid || this.id
       }
+      let resolved = ''
+      try {
+        if (type === 'group') {
+          resolved = QQBotIdMap.findGroupByQQ(this.id, openid)?.group_openid || ''
+        } else {
+          const groupOpenid = resolveEvent.group_openid || resolveEvent.openid_group_id || ''
+          const groupQQ = /^\d+$/.test(String(resolveEvent.group_id || ''))
+            ? resolveEvent.group_id
+            : ''
+          resolved = QQBotIdMap.findUserByQQ(this.id, openid, {
+            groupOpenid,
+            groupQQ,
+            preferPrivate: type === 'private'
+          })?.user_openid || ''
+        }
+      } catch {
+        // 映射表不可用时继续尝试全局转换函数。
+      }
+      if (!resolved && Bot.QQToOpenid) {
+        try {
+          resolved = await Bot.QQToOpenid(openid, resolveEvent, type)
+        } catch {
+          // 映射不存在时保留原始 ID，后续给出明确错误。
+        }
+      }
+      if (resolved) openid = String(resolved).trim()
     }
 
     if (type === 'private' && /^\d+$/.test(openid)) {
       throw new Error('QQBot 私聊 QQ 号尚未绑定 C2C 用户 OpenID')
+    }
+    if (type === 'user' && context.message_type === 'group' && /^\d+$/.test(openid)) {
+      throw new Error('QQBot 群成员 QQ 号尚未绑定当前群 OpenID')
     }
 
     return openid.startsWith(prefix) ? openid.slice(prefix.length) : openid

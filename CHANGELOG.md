@@ -6,6 +6,11 @@
 * 新增群全量消息订阅、WebHook 接入、消息引用缓存、QQ/OpenID 身份映射和按钮扩展支持。
 * 修复群聊、C2C 私聊与频道按钮互动的场景分流、重复回调、斜杠命令转义及被动回复事件 ID 使用问题。
 * 修复需要用户继续输入参数的按钮被立即执行，并修复 `plugins/button` 按钮模块的跨平台热加载、动态创建和快速连续修改。
+* 新增 QQBot 群禁言测试 Demo：获取被 @ 的成员，默认禁言 60 秒。
+* 修复 QQBot 身份映射为兼容 OneBot 事件后，禁言测试 Demo 无法识别 QQBot Bot 包装对象的问题。
+* QQBot 群禁言接口兼容 ICQQ/OneBot 数字 QQ 号，并按当前群上下文转换为成员 OpenID。
+* 移除禁言前对 QQBot 内邀群成员详情接口的依赖，改由官方禁言接口完成目标成员权限校验。
+* 修复 QQBot 数字时长禁言在权限检查或 OpenID 映射耗时后实际时长变短的问题。
 
 ## [1.5.6](https://gitee.com/lylnspace/Lain-plugin/commits/master) (2024-07-18)
 

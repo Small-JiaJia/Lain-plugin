@@ -187,7 +187,11 @@ QQ 官方暂未提供可等价替代的历史消息接口，因此 `getChatHisto
 
 ## QQ 群管理
 
-QQ 群机器人可以使用官方 API v2 查询入群申请、审批申请、管理禁言规则。禁言和查询禁言前会先查询 `bot_state.member_role`；禁言前还会逐个查询目标成员的 `member_role`，只允许普通成员。机器人不是管理员、目标是群主或管理员、接口未开放时，调用会抛出带原因的错误，不会发送禁言请求。群禁言最长 30 天，批量一次最多 20 人。
+QQ 群机器人可以使用官方 API v2 查询入群申请、审批申请、管理禁言规则。禁言和查询禁言前会先查询 `bot_state.member_role`，确认机器人具有群管理员身份；禁言请求不再调用官方群成员详情接口做前置校验，因为该接口目前仍处于内邀阶段。目标为群主、管理员或机器人时，由官方禁言接口拒绝操作。群禁言最长 30 天，批量一次最多 20 人。
+
+仓库提供禁言测试 Demo：群内由主人发送 `#禁言测试 @成员`，默认禁言 60 秒；也可以发送 `#禁言测试 120 @成员` 或 `#QQBot禁言测试 120 @成员` 指定秒数。命令会从消息中的 `at` 段获取第一个非机器人的目标成员，仅支持 QQBot 群聊，并要求机器人具有群管理员权限。
+
+禁言接口兼容 ICQQ/OneBot 风格的数字 QQ 号：`group.muteMember(1004148094, 60)` 或 `bot.setGroupMemberMute(群号, QQ号, 60)` 会根据当前群映射自动转换为 QQBot OpenID；数字时长会在权限检查和映射完成后计算，避免网络耗时被计入禁言时间。如果当前群没有该 QQ 号的映射，会返回明确的绑定提示。
 
 ```js
 const bot = Bot['机器人 AppID']
@@ -249,7 +253,7 @@ await bot.deleteJoinApprovalStrategy(strategy.strategy_id)
 
 创建策略时 `group_openids` 与 `group_ids` 必须二选一，最多关联 100 个群；白名单单次最多 10000 个 QQ 号。执行后会异步扫描关联群的申请。
 
-`/bot_state` 和成员详情接口在官方文档中标注为白名单或内邀能力。若尚未获得权限，适配器会报告原始 API 错误并阻止禁言及主动发送；需在 QQ 开放平台申请相应权限。可查看[机器人群内状态](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html)、[群成员详情](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)、[设置成员禁言](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_restrict_chat_setting.post.html)及[群消息发送](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)。
+官方文档显示，群成员列表与成员详情接口目前处于“内邀接入中”，不能作为禁言的前置校验；适配器只使用 `/bot_state` 检查机器人自身的群角色，然后直接调用设置成员禁言接口，由 QQ 官方完成目标成员权限校验。`/bot_state` 仍属于白名单能力，未获权限时会报告接口错误；可查看[启动接入](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)、[机器人群内状态](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html)、[群成员详情](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)、[设置成员禁言](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_restrict_chat_setting.post.html)及[群消息发送](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)。
 
 ## 相关文档
 
