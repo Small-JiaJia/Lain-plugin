@@ -1148,10 +1148,14 @@ export default class adapterQQBot {
       const hasExplicitButtons = common.array(msg).some(item =>
         item?.type === 'keyboard' || item?.type === 'button' || QQBotButton.isButton(item)
       )
-      if (!hasExplicitButtons) {
+      const isProfilePanel = /^#面板(?:\s*\d{9,10})?$/.test(String(e.msg || ''))
+      if (!hasExplicitButtons || isProfilePanel) {
         const btnRows = await getAutoButtons()
         if (btnRows?.length) {
-          msg = Array.isArray(msg) ? [...msg, ...btnRows] : [msg, ...btnRows]
+          const content = isProfilePanel
+            ? common.array(msg).filter(item => item?.type !== 'keyboard' && item?.type !== 'button')
+            : common.array(msg)
+          msg = [...content, ...btnRows]
         }
       }
       return await this.sendReplyMsg(e, msg, quote)
@@ -1787,7 +1791,7 @@ export default class adapterQQBot {
             ? this.parseMqqapiInlineCommand(btn.action.data)
             : null
           if (inlineCommand) {
-            buttons.push(this.normalizeGroupButtonAction(e, {
+            buttons.push(this.normalizeConversationButtonAction(e, {
               ...btn,
               action: {
                 ...btn.action,
@@ -1795,9 +1799,9 @@ export default class adapterQQBot {
                 data: inlineCommand.command,
                 enter: inlineCommand.enter
               }
-            }))
+            }, true))
           } else {
-            buttons.push(this.normalizeGroupButtonAction(e, btn))
+            buttons.push(this.normalizeConversationButtonAction(e, btn, !!btn.inlineCommand))
           }
         } else {
           const inlineCommand = btn.link ? this.parseMqqapiInlineCommand(btn.link) : null
@@ -1812,8 +1816,8 @@ export default class adapterQQBot {
             style: btn.style,
             tips: btn.tips ?? btn.unsupport_tips,
             QQBot: btn.QQBot,
-          }, buttons.length % 2)
-          if (built) buttons.push(this.normalizeGroupButtonAction(e, built))
+          }, buttons.length % 2, !!(inlineCommand || btn.inlineCommand))
+          if (built) buttons.push(this.normalizeConversationButtonAction(e, built, !!(inlineCommand || btn.inlineCommand)))
         }
         if (buttons.length >= 5) {
           result.push({ buttons: buttons.splice(0, 5) })
@@ -1945,7 +1949,7 @@ export default class adapterQQBot {
       (link, label, url) => {
         const command = this.parseMqqapiInlineCommand(url)
         if (!command) return link
-        buttons.push({ text: label.trim(), input: command.command, send: command.enter })
+        buttons.push({ text: label.trim(), input: command.command, send: command.enter, inlineCommand: true })
         return ''
       }
     )
@@ -2415,6 +2419,19 @@ export default class adapterQQBot {
       raw_message: msg,
       msg,
       reply: async (replyMsg) => {
+        const hasExplicitButtons = common.array(replyMsg).some(item =>
+          item?.type === 'keyboard' || item?.type === 'button' || QQBotButton.isButton(item)
+        )
+        const isProfilePanel = /^#面板(?:\s*\d{9,10})?$/.test(String(data.msg || ''))
+        if (!hasExplicitButtons || isProfilePanel) {
+          const buttons = await this.button(data)
+          if (buttons?.length) {
+            const content = isProfilePanel
+              ? common.array(replyMsg).filter(item => item?.type !== 'keyboard' && item?.type !== 'button')
+              : common.array(replyMsg)
+            replyMsg = [...content, ...buttons]
+          }
+        }
         if (groupId) {
           return this.sendGroupMsg(groupId, replyMsg, {
             eventId: interactionId,
@@ -2471,7 +2488,7 @@ export default class adapterQQBot {
    * action type: 0=link, 1=callback, 2=input
    * permission: 'all'(默认) | 'admin' | ['uid1', 'uid2']
    */
-  buildButton (e, btn, style = 0) {
+  buildButton (e, btn, style = 0, preserveInput = false) {
     const id = 'bt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
     const msg = {
       id,
@@ -2538,12 +2555,13 @@ export default class adapterQQBot {
       }
     }
 
-    return this.normalizeGroupButtonAction(e, msg)
+    return this.normalizeConversationButtonAction(e, msg, preserveInput)
   }
 
-  /** 全量接收群里的指令按钮使用回调，点击时不会由 QQ 客户端自动插入 @bot。 */
-  normalizeGroupButtonAction (e, button) {
-    const convert = !!e?.group_id && e.qqbot_recv_msg_setting === 'all' && Number(button?.action?.type) === 2
+  /** 私聊和全量接收群的普通指令按钮使用回调，避免客户端发送指令或自动插入 @bot。 */
+  normalizeConversationButtonAction (e, button, preserveInput = false) {
+    const convert = !preserveInput && Number(button?.action?.type) === 2 &&
+      (!e?.group_id || e.qqbot_recv_msg_setting === 'all')
     if (!convert && Number(button?.action?.type) !== 1) return button
     if (String(button.id).startsWith('bt_') && Bot[this.id]?.callback?.[button.id]) return button
     const id = 'bt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)

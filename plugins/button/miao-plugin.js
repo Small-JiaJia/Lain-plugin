@@ -1,5 +1,6 @@
 // @requiredPlugin miao-plugin
 import Character from '../../../miao-plugin/models/Character.js'
+import Player from '../../../miao-plugin/models/Player.js'
 import Meta from '../../../miao-plugin/components/Meta.js'
 
 // 来自 miao-plugin.js
@@ -133,7 +134,19 @@ class Button {
         game = '绝区零'
     }
     const maxButtons = 12
-    const roleList = e?.newChar ? (Object.keys(e.newChar).slice(0, maxButtons) || []) : []
+    let roleList = e?.newChar ? Object.keys(e.newChar).slice(0, maxButtons) : []
+    // 普通 #面板 查询不会设置 newChar；从当前 UID 的本地面板读取实际展示的角色。
+    if (!roleList.length && e?.uid) {
+      try {
+        const profiles = Player.create(e)?.getProfiles() || {}
+        roleList = Object.entries(profiles)
+          .map(([id, profile]) => profile?.char?.name || Character.get(id)?.name)
+          .filter(Boolean)
+          .slice(0, maxButtons)
+      } catch (error) {
+        logger.debug(`喵喵面板角色按钮读取失败：${error?.message || error}`)
+      }
+    }
 
     const button = []
 

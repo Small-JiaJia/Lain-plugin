@@ -64,7 +64,7 @@ QQBot 将 `GROUP_AT_MESSAGE_CREATE`（群 @ 机器人）和 `GROUP_MESSAGE_CREAT
 
 收到群消息时，适配器调用官方 `GET /v2/groups/{group_openid}/bot_state`，并在事件上设置 `e.qqbot_group_state`、`e.qqbot_recv_msg_setting`（`all`、`only_mention` 或 `mention_and_context`）和 `e.qqbot_allow_proactive_msg`。状态短暂缓存 15 秒，避免超过官方 30 QPM 限制。接口未开放时，`e.qqbot_group_state_error` 记录原因；全量事件仍按自身事件类型决定按钮行为。该接口仅对获白名单权限的机器人开放。
 
-群回复的指令按钮在 `recv_msg_setting=all` 时自动改用回调动作，点击不会由 QQ 客户端插入 `@bot`；其他接收类型保留官方指令按钮的 `@bot` 行为。回调事件在兼容层中标记 `atme=true`，但消息数组不会传入一个指向机器人自己的 `at` 段。主动调用 `Bot[appid].pickGroup(groupOpenID).sendMsg(...)` 时先检查 `allow_proactive_msg`，未开启或无法查询时抛出明确错误；被动回复仍使用消息或事件 ID。
+私聊中的普通指令按钮自动改用回调动作，点击后用户无需发送消息；群回复的指令按钮在 `recv_msg_setting=all` 时也自动改用回调，点击不会由 QQ 客户端插入 `@bot`。显式 mqqapi 内联命令保留原生输入动作。其他群接收类型保留官方指令按钮行为。回调事件在兼容层中标记 `atme=true`，但消息数组不会传入一个指向机器人自己的 `at` 段。回调回复使用互动 ID，属于被动回复。主动调用 `Bot[appid].pickGroup(groupOpenID).sendMsg(...)` 时先检查 `allow_proactive_msg`，未开启或无法查询时抛出明确错误；被动回复仍使用消息或事件 ID。
 
 群 @ 事件自身已经表示“@ 机器人”。适配器会从供插件使用的 `e.message` 中移除机器人自己的 at 段，避免 ICQQ 兼容层再次将它识别成普通 @ 目标；消息正文、`e.atme` 和其他用户的 at 段仍然保留。全量消息不设置 `e.atme`，除非消息内容确实包含机器人 mention。
 
