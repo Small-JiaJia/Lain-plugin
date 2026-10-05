@@ -192,3 +192,4 @@ requiredPlugin: 'miao-plugin'
 - 只有顶层 `.js` 文件会被 `plugins/button` 加载；文件放在子目录时不会自动递归读取。
 - 点击后无响应时，确认按钮是输入动作且 `data` 是插件可识别的指令；回调动作则检查 QQBot interaction 事件权限。
 - 回调按钮点击成功但机器人未回复时，查看日志中的“QQBot 按钮互动回应失败”或“QQBot 按钮命令处理失败”；回调回复使用官方互动 ID，并会按群聊或私聊消息交给插件。
+- 同一 AppID 同时接入 QQ 群和频道时，按钮互动按官方 `scene` 分流；群和 C2C 按钮由 QQBot 适配器处理，频道按钮由 QQGuild 适配器处理。

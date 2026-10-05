@@ -2322,6 +2322,10 @@ export default class adapterQQBot {
 
   /** 处理按钮交互事件 */
   async handleInteraction (event) {
+    // SDK 的互动事件同时广播给 QQBot 与 QQGuild；只处理群和 C2C 场景。
+    const scene = event.notice_type || event.scene ||
+      (event.group_id || event.group_openid ? 'group' : event.user_openid ? 'c2c' : '')
+    if (!['group', 'friend', 'c2c'].includes(scene)) return
     const interactionType = Number(event.data?.type ?? event.type)
     // 官方仅要求消息按钮和单聊快捷菜单回调；反馈、授权等互动不是命令。
     if (Number.isFinite(interactionType) && ![11, 12].includes(interactionType)) return
@@ -2331,7 +2335,10 @@ export default class adapterQQBot {
     // 官方被动回复需要互动 ID；群、私聊的操作者则由 SDK 存在 operator_id。
     const interactionId = event.notice_id || event.id
     const operatorId = event.operator_id || event.user_openid || event.group_member_openid || event.operator_openid || event.user_id
-    const groupId = Bot[this.id]?.callback?.[btnId]?.group_id || event.group_id || event.group_openid
+    const ownCallback = btnId && Bot[this.id]?.callback?.[btnId]
+    // 旧消息可能由频道按钮构造器生成；只借用其命令文本，群上下文始终取官方事件。
+    const callback = ownCallback || (btnId && Bot[`qg_${this.id}`]?.callback?.[btnId])
+    const groupId = event.group_id || event.group_openid || ownCallback?.group_id
 
     const acknowledge = async code => {
       try {
@@ -2349,7 +2356,6 @@ export default class adapterQQBot {
       return
     }
 
-    const callback = btnId && Bot[this.id]?.callback?.[btnId]
     let msg = ''
 
     if (callback) {
@@ -2359,6 +2365,7 @@ export default class adapterQQBot {
     }
 
     if (!msg) {
+      logger.warn(`QQBot 按钮回调缺少命令：scene=${scene} button_id=${btnId || ''}`)
       await acknowledge(1)
       return
     }

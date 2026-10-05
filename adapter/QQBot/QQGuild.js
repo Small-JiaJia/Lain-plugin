@@ -700,6 +700,9 @@ export default class adapterQQGuild {
 
   /** 处理按钮交互事件（频道） */
   async handleInteraction (event) {
+    // QQBot 群/C2C 与频道共用 SDK；群和单聊互动应交给 QQBot 适配器。
+    const scene = event.notice_type || event.scene
+    if (scene !== 'guild' && !event.guild_id && !event.channel_id) return
     const btnId = event.data?.resolved?.button_id
     const btnData = event.data?.resolved?.button_data
     // 兼容新旧字段: 新版用 operator_openid / group_member_openid
