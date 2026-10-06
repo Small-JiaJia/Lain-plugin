@@ -11,6 +11,10 @@
 * QQBot 群禁言接口兼容 ICQQ/OneBot 数字 QQ 号，并按当前群上下文转换为成员 OpenID。
 * 移除禁言前对 QQBot 内邀群成员详情接口的依赖，改由官方禁言接口完成目标成员权限校验。
 * 修复 QQBot 数字时长禁言在权限检查或 OpenID 映射耗时后实际时长变短的问题。
+* 为 QQBot 原生层和 ICQQ 兼容层的 `pickGroup()` 增加基于 `/bot_state` 的异步 `is_admin()`、`is_owner()` 权限方法。
+* 修复非斜杠插件别名被上游规范化为 `#` 后误触发按钮扩展，并增加 ZZZ 面板角色列表的容错。
+* ZZZ 按钮支持 `%角色面板`，miao 按钮支持 `*角色面板` 及 `*更新面板`。
+* 修复 22009 补参数插件处理 QQBot C2C 私聊时将空 `group_id` 传入 Sequelize 的错误。
 
 ## [1.5.6](https://gitee.com/lylnspace/Lain-plugin/commits/master) (2024-07-18)
 

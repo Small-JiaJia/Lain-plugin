@@ -197,6 +197,10 @@ QQ 群机器人可以使用官方 API v2 查询入群申请、审批申请、管
 const bot = Bot['机器人 AppID']
 const group = bot.pickGroup('群 OpenID')
 
+// 群权限方法查询的是机器人自身在群内的角色；群主同时属于管理员
+const isAdmin = await group.is_admin()
+const isOwner = await group.is_owner()
+
 // 禁言 10 分钟；传 0 解除禁言
 try {
   await group.muteMember('成员 OpenID', 600)
@@ -254,6 +258,8 @@ await bot.deleteJoinApprovalStrategy(strategy.strategy_id)
 创建策略时 `group_openids` 与 `group_ids` 必须二选一，最多关联 100 个群；白名单单次最多 10000 个 QQ 号。执行后会异步扫描关联群的申请。
 
 官方文档显示，群成员列表与成员详情接口目前处于“内邀接入中”，不能作为禁言的前置校验；适配器只使用 `/bot_state` 检查机器人自身的群角色，然后直接调用设置成员禁言接口，由 QQ 官方完成目标成员权限校验。`/bot_state` 仍属于白名单能力，未获权限时会报告接口错误；可查看[启动接入](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)、[机器人群内状态](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html)、[群成员详情](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)、[设置成员禁言](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_restrict_chat_setting.post.html)及[群消息发送](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)。
+
+QQBot 的 `pickGroup()` 在原生事件和 ICQQ 兼容事件中都提供异步 `is_admin()`、`is_owner()` 方法，依据 `/bot_state.member_role` 判断机器人权限；接口未授权或查询失败时方法会抛出错误，调用方应使用 `try/catch` 处理。
 
 ## 相关文档
 

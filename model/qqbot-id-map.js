@@ -652,6 +652,26 @@ class QQBotIdMap {
       e.group = this.mergeApiObject(e.group, pickedGroup)
       e.group_id = groupQQ
       e.group_name = e.group_name || e.group?.name || String(groupQQ)
+      // ICQQ 兼容层也提供异步群权限方法。优先复用原生 QQBot 群对象，
+      // 在身份映射路由尚未建立时再直接调用 QQBot 的 bot_state 接口。
+      const getGroupState = async () => {
+        if (typeof e.group?.getBotState === 'function') return await e.group.getBotState()
+        const permissionBot = [
+          bot,
+          e.qqbot_bot,
+          Bot?.[qqbotSelfId]
+        ].find(item => typeof item?.getGroupBotState === 'function')
+        if (!permissionBot) throw new Error('QQBot 群权限查询失败：缺少 QQBot Bot 实例')
+        return await permissionBot.getGroupBotState(groupOpenid || groupQQ)
+      }
+      e.group.is_admin = async () => {
+        const state = await getGroupState()
+        return ['admin', 'owner'].includes(state.member_role)
+      }
+      e.group.is_owner = async () => {
+        const state = await getGroupState()
+        return state.member_role === 'owner'
+      }
       if (this.isMemberListConvertEnabled(qqbotSelfId, groupOpenid)) {
         this.attachCachedMemberApis(e.group, {
           self_id: qqbotSelfId,

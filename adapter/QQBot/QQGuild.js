@@ -1,4 +1,3 @@
-import lodash from 'lodash'
 import MiaoCfg from '../../../../lib/config/config.js'
 import loader from '../../../../lib/plugins/loader.js'
 import common from '../../lib/common/common.js'
@@ -538,8 +537,8 @@ export default class adapterQQGuild {
   }
 
   /** 前缀处理 */
-  hasAlias(text, e, hasAlias = true) {
-    text = text.trim()
+  hasAlias(text, e, keepAlias = true) {
+    text = String(text ?? '').trim()
     if (this.isSlashToHashEnabled() && this.isSlashCommand(text)) {
       return this.slashToHash(text)
     }
@@ -549,14 +548,16 @@ export default class adapterQQGuild {
     if (!Array.isArray(alias)) {
       alias = [alias]
     }
-    for (let name of alias) {
-      if (text.startsWith(name)) {
-        /** 先去掉前缀 再 / => # */
-        text = lodash.trimStart(text, name)
-        if (this.isSlashToHashEnabled()) text = this.slashToHash(text)
-        if (hasAlias) return name + text
-        return text
-      }
+    for (const name of alias) {
+      const prefix = String(name ?? '')
+      if (!prefix || !text.startsWith(prefix)) continue
+
+      // 只有去掉别名后仍以 / 开头时才转换；%、*、普通文字等前缀保持原样。
+      const command = text.slice(prefix.length)
+      const normalized = this.isSlashToHashEnabled() && this.isSlashCommand(command)
+        ? this.slashToHash(command)
+        : command
+      return keepAlias ? prefix + normalized : normalized
     }
     return text
   }

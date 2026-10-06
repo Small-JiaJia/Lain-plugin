@@ -333,8 +333,16 @@ export default class adapterQQBot {
   /** 群对象 */
   pickGroup(groupID) {
     return {
-      is_admin: false,
-      is_owner: false,
+      /** 查询机器人在群内是否为管理员；群主同时视为管理员。 */
+      is_admin: async () => {
+        const state = await this.getGroupBotState(groupID)
+        return ['admin', 'owner'].includes(state.member_role)
+      },
+      /** 查询机器人在群内是否为群主。 */
+      is_owner: async () => {
+        const state = await this.getGroupBotState(groupID)
+        return state.member_role === 'owner'
+      },
       recallMsg: async (msg_id) => await this.recallGroupMsg(groupID, msg_id),
       sendMsg: async (msg) => await this.sendGroupMsg(groupID, msg),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
@@ -1182,6 +1190,8 @@ export default class adapterQQBot {
     }
     this.normalizeIncomingMessage(e, tinyId)
     this.defineIncomingMsg(e)
+    // 上游插件可能为了匹配规则改写 e.msg；按钮匹配需要保留适配器收到的原始命令。
+    this.rememberButtonCommand(e)
     // 先用 ref_msg_idx 恢复被引用消息的真实 message_id，再缓存当前消息的
     // msg_idx → message_id 映射，供后续引用、撤回和历史消息查询使用。
     await this.hydrateReferenceMessage(e, data, isGroup)
@@ -1396,6 +1406,23 @@ export default class adapterQQBot {
     })
   }
 
+  rememberButtonCommand(e) {
+    if (!e || Object.prototype.hasOwnProperty.call(e, 'qqbot_button_command')) return
+    Object.defineProperty(e, 'qqbot_button_command', {
+      value: String(e.msg ?? e.raw_message ?? '').trim(),
+      enumerable: false,
+      configurable: true,
+      writable: true
+    })
+  }
+
+  getButtonCommand(e) {
+    const original = String(e?.qqbot_button_command ?? '').trim()
+    // 非斜杠/井号命令可能被上游插件改写成标准 # 命令；自动按钮仍按原始前缀匹配。
+    if (original && !/^[#＃/／]/.test(original)) return original
+    return String(e?.msg ?? original).trim()
+  }
+
   normalizeMsgText(value, base = '') {
     let text = this.normalizeCommandText(String(value || '').replace(/<@!?[^>]+>\s*/g, '').trim())
     const normalizedBase = String(base || '').trim()
@@ -1465,8 +1492,8 @@ export default class adapterQQBot {
   }
 
   /** 前缀处理 */
-  hasAlias(text, e, hasAlias = true) {
-    text = text.trim()
+  hasAlias(text, e, keepAlias = true) {
+    text = String(text ?? '').trim()
     if (this.isSlashToHashEnabled() && this.isSlashCommand(text)) {
       return this.slashToHash(text)
     }
@@ -1476,14 +1503,16 @@ export default class adapterQQBot {
     if (!Array.isArray(alias)) {
       alias = [alias]
     }
-    for (let name of alias) {
-      if (text.startsWith(name)) {
-        /** 先去掉前缀 再 / => # */
-        text = lodash.trimStart(text, name)
-        if (this.isSlashToHashEnabled()) text = this.slashToHash(text)
-        if (hasAlias) return name + text
-        return text
-      }
+    for (const name of alias) {
+      const prefix = String(name ?? '')
+      if (!prefix || !text.startsWith(prefix)) continue
+
+      // 只有去掉别名后仍以 / 开头时才转换；%、*、普通文字等前缀保持原样。
+      const command = text.slice(prefix.length)
+      const normalized = this.isSlashToHashEnabled() && this.isSlashCommand(command)
+        ? this.slashToHash(command)
+        : command
+      return keepAlias ? prefix + normalized : normalized
     }
     return text
   }
@@ -2053,7 +2082,7 @@ export default class adapterQQBot {
       }
       rules.sort((a, b) => a.priority - b.priority || a.source.localeCompare(b.source, 'zh-CN'))
       for (const { module, rule } of rules) {
-        if (new RegExp(rule.reg).test(String(e.msg ?? ''))) {
+        if (new RegExp(rule.reg).test(this.getButtonCommand(e))) {
           module.e = e
           const button = await module[rule.fnc](e)
           if (button) return [...(Array.isArray(button) ? button : [button])]
@@ -2522,6 +2551,7 @@ export default class adapterQQBot {
 
     // YunZai 装载器会将 text 段再次拼入 e.msg；与普通入站消息使用同一赋值器去重。
     this.defineIncomingMsg(data)
+    this.rememberButtonCommand(data)
 
     if (data.group_id) {
       data.group = this.pickGroup(groupId)
