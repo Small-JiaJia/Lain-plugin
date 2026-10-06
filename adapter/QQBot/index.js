@@ -1626,6 +1626,8 @@ export default class adapterQQBot {
           break
         }
         case 'at': {
+          // C2C 只有当前会话用户；官方私聊消息不接受 qqbot-at-user 标签。
+          if (!e?.group_id) break
           if ((i.qq || i.id) === 'all') {
             content += '<qqbot-at-everyone />'
           } else {
@@ -1975,6 +1977,7 @@ export default class adapterQQBot {
           if (i.text) content.push(String(i.text).replace(/@/g, '@\u200B').replace(/<qqbot-/g, '<qqbot-\u200B'))
           break
         case 'at':
+          if (!e?.group_id) break
           if ((i.qq || i.id) === 'all') {
             content.push('<qqbot-at-everyone />')
           } else {
@@ -2218,13 +2221,21 @@ export default class adapterQQBot {
     return this.returnResult(await this.sendRichFile('group', groupID, file, name))
   }
 
+  /** 私聊 Markdown 不支持 @ 标签；也清理插件直接提供的 Markdown 内容。 */
+  stripC2CAtTags (content) {
+    return String(content ?? '').replace(/<qqbot-at-(?:user|everyone)\b[^>]*\/>/gi, '')
+  }
+
   /** 一条云崽消息可包含普通内容和文件；文件通过富媒体接口单独发送。 */
   async sendQQBotPiece (targetType, targetId, message, source = {}) {
     const parts = common.array(message)
     const files = parts.filter(item => item?.type === 'file')
     const normal = parts.filter(item => item?.type !== 'file')
     const reply = normal.find(item => item?.type === 'reply')
-    const normalContent = normal.filter(item => item?.type !== 'reply')
+    const normalContent = normal.filter(item => item?.type !== 'reply').map(item => {
+      if (targetType !== 'user' || item?.type !== 'markdown' || typeof item.content !== 'string') return item
+      return { ...item, content: this.stripC2CAtTags(item.content) }
+    })
     const context = typeof source === 'string' ? { messageId: source } : (source || {})
     const sourceMessageId = context.messageId || context.msgId || context.id || reply?.id || ''
     const sourceEventId = context.eventId || reply?.event_id || ''
@@ -2808,6 +2819,7 @@ export default class adapterQQBot {
           parts.push(i.text)
           break
         case 'at':
+          if (!e?.group_id) break
           if (i.qq === 'all') {
             parts.push('<qqbot-at-everyone />')
           } else {

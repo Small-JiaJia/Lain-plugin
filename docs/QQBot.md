@@ -160,6 +160,7 @@ C2C 主要接口和行为：
 - 撤回：`DELETE /v2/users/{openid}/messages/{message_id}`。
 - C2C 文件使用 `/files`、`/upload_prepare` 与 `/upload_part_finish` 上传流程，发送消息时携带 `msg_type: 7` 和 `media.file_info`。
 - 私聊入站消息的 `e.reply()`、`e.friend.sendMsg()` 使用消息 ID 被动回复；按钮交互和好友通知可使用 `event_id` 回复。主动调用 `Bot[appid].sendPrivateMsg()` 或无入站上下文的 `pickFriend().sendMsg()` 不带被动回复 ID。
+- C2C 私聊不支持 Markdown 的 `<qqbot-at-user />` 和 `<qqbot-at-everyone />`。适配器会在私聊回复中省略 `at` 消息段对应的标签，并在发送前清理插件直接提供的此类标签；其余文字、图片和按钮照常发送。群聊仍保留 @ 功能。
 - 私聊被动回复窗口为 60 分钟，每条入站消息最多被动回复 4 次。主动发送受平台频率、用户设置和机器人权限限制；消息类型、权限及限制请以官方发送消息文档为准。
 
 流式协议和输入状态通知由 QQ 官方 Node SDK 的当前实现提供参考；如平台修改字段或限制，请以 [官方 C2C 消息 API 文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)、[官方单聊事件文档](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)、[官方流式会话实现](https://github.com/tencent-connect/qqbot-nodejs/blob/main/src/streaming.ts) 与 [腾讯 QQBot Node.js SDK](https://github.com/tencent-connect/qqbot-nodejs) 为准。
