@@ -18,6 +18,19 @@ export class RecallTest extends plugin {
   }
 
   async recall (e) {
+    // 在处理消息前检查操作者权限；不使用 group.is_admin（它表示机器人自身权限）。
+    const isGroup = e.message_type === 'private' || e.isPrivate === true
+      ? false
+      : e.isGroup === true || e.message_type === 'group' || e.group_id != null
+    const role = e.member?.role || e.member?.info?.role || e.member?._info?.role || e.sender?.role
+    const isAdmin = e.member?.is_admin === true || e.member?.is_owner === true ||
+      role === 'admin' || role === 'owner'
+    if (e.isMaster !== true && !(isGroup && isAdmin)) {
+      return await e.reply(isGroup
+        ? '暂无权限，只有群主、管理员或机器人主人才能使用撤回测试。'
+        : '暂无权限，私聊撤回测试仅允许机器人主人使用。')
+    }
+
     const isTest = /测试/.test(String(e.msg || e.raw_message || ''))
     let reference = getRecallReference(e)
     if (!reference && !isTest) {
