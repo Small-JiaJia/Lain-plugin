@@ -39,7 +39,20 @@ pnpm install -P
 
 ## 按钮扩展
 
-已整理的扩展文件位于 `plugins/button/`，每个目标插件对应一个顶层 `.js` 文件。按钮加载器检查 `requiredPlugin`；未安装的插件不会加载其按钮。你可以在该目录新增自己的按钮文件，修改后会热更新。插件回复时，适配器按规则优先级匹配并附加按钮；按钮字段和完整示例请查看[开发文档](./docs/QQBot-Buttons.md)。
+`plugins/button/` 现在是[独立 Git 仓库](https://github.com/win-syswow64/Lain-plugin-button)，本体不再跟踪按钮文件。首次启动会从 `resources/button.bundle` 离线初始化，保留已有按钮文件并备份；已有独立仓库不会被本体更新覆盖。每个目标插件仍对应一个顶层 `.js` 文件，缺少目标插件时跳过加载。
+
+个人自定义按钮放在 `plugins/button/example/`，允许创建子目录，新增、修改、删除会热更新。个人文件默认由按钮仓库忽略，更新本体不会受按钮修改影响。
+
+```bash
+# 在 Lain-plugin 目录手动初始化或检查独立仓库
+node scripts/button-repository.js
+git -C plugins/button status
+
+# 单独更新按钮库
+ git -C plugins/button pull --ff-only
+```
+
+本体的 `#铃音更新` / `#Lain更新` 只更新本体，不执行按钮仓库的 pull。不要在本体中重新跟踪 `plugins/button/`。独立仓库说明在 `plugins/button/README.md`，按钮接口、旧安装迁移和示例见[开发文档](./docs/QQBot-Buttons.md)。
 
 发送 `#回调按钮测试` 可查看仓库自带的回调按钮示例，点击“测试回调 +1”后会收到确认回复。
 

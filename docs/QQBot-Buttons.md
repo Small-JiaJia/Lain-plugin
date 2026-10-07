@@ -42,6 +42,30 @@ QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的
 
 回调按钮只处理群消息和 C2C 私聊中的消息按钮/单聊快捷菜单互动；频道互动由 `QQGuild` 适配器处理。适配器会先确认互动，再把按钮数据作为一次 YunZai 消息交给对应场景的插件。按钮上下文中的 `e.reply()`、`e.markdown()` 和 `e.sendMsg()` 会继续使用这次互动的被动回复上下文；不要把互动事件体的 `d.id` 当作消息接口的 `event_id`。
 
+## 独立按钮仓库与升级迁移
+
+按钮库在 `plugins/button` 有自己的 `.git`，Lain-plugin 本体通过 `.gitignore` 排除整个目录，既不保存按钮文件，也不保存子模块指针。因此修改按钮不会阻塞本体的 `git pull` 或更新命令。`resources/button.bundle` 是首次安装的离线 Git 种子；本体更新不会使用新种子覆盖已有按钮仓库。
+
+两个仓库分别提交和更新：在本体提交适配器与文档；用 `git -C plugins/button` 管理按钮改动。首次初始化的 origin 为 `https://github.com/win-syswow64/Lain-plugin-button.git`，不会指向本体仓库；已有仓库的 origin 保持原配置。需要使用个人分支时执行 `git -C plugins/button remote set-url origin <你的按钮仓库Git地址>`。单独更新按钮用 `git -C plugins/button pull --ff-only`，有已跟踪按钮冲突时由按钮仓库自行处理。
+
+`example/demo.js` 提供输入、回调和链接按钮示例。个人文件放到 `example` 或其子目录，默认不被按钮仓库跟踪；需要发布时在按钮仓库执行 `git add -f example/文件名.js`，或在 example 子目录建立自己的仓库。所有自定义扩展仍须满足下文按钮类接口；普通 YunZai 消息插件应安装在 YunZai/plugins。
+
+首次从旧版升级时，旧本体可能仍跟踪按钮文件。新的更新命令会先备份完整按钮目录及已暂存的按钮补丁，再清理本体中这些文件的改动；更新结束后恢复按钮并初始化独立仓库。备份保存在 `data/button-backups/`，不会删除你的旧文件。更新失败也会尝试恢复按钮。
+
+手动 git pull 的旧安装需要先载入迁移脚本（适用于远程仓库已包含此版本）：
+
+```bash
+# 在 Lain-plugin 根目录，先获取脚本，不覆盖按钮。
+ git fetch origin
+ mkdir -p temp
+ git show FETCH_HEAD:scripts/button-repository.js > temp/button-repository.mjs
+ node temp/button-repository.mjs --prepare-update
+ git pull --ff-only
+ node scripts/button-repository.js
+```
+
+该过程只清理本体曾跟踪的 button 文件，其他本体修改仍由 Git 正常检查。迁移记录在 `data/button-migration.json`，不要在恢复前删除它或对应备份。已使用独立按钮仓库的安装不再需要此步骤。初始化失败时保留备份和暂存目录，并在日志中给出错误。
+
 ## 在插件代码中添加按钮
 
 ### `Bot.Button()`
@@ -148,7 +172,7 @@ await e.markdown(
 
 ### 1. 创建文件
 
-在 Miao-Yunzai 的 Lain-plugin 目录下创建 `plugins/button`（没有时自行新建），并在该目录顶层新建一个 `.js` 文件。目录首次新建后会自动开始监听；添加、修改或删除按钮文件时会热更新，无需反复重启 YunZai。目录示例：
+在 Miao-Yunzai 的 Lain-plugin 目录执行 `node scripts/button-repository.js` 初始化独立按钮仓库（首次启动也会自动初始化）。自定义文件放在 `plugins/button/example/`，可以创建任意层级的子目录。添加、修改或删除按钮文件时会热更新，无需重启 YunZai。目录示例：
 
 ```text
 Miao-Yunzai/
@@ -159,7 +183,7 @@ Miao-Yunzai/
                 └── miao-plugin.js
 ```
 
-加载器会读取该目录顶层的 `.js` 文件，并监听新增、修改和删除事件以热更新。监听路径会兼容 Windows 的反斜杠；子目录中的文件不会被当作按钮模块加载。文件必须默认导出一个构造函数。
+加载器读取 button 顶层的 `.js` 文件，并递归读取 example 下的 `.js` 文件。隐藏文件、隐藏目录和 node_modules 被忽略，example 以外的子目录不会加载。新增、修改和删除均支持热更新，包括启动后才创建的 example 子目录。文件必须默认导出一个构造函数。
 
 ### 2. 填写插件规则和按钮方法
 
@@ -232,7 +256,7 @@ requiredPlugin: 'miao-plugin'
 
 ## 插件包内的按钮文件
 
-也可以在插件包顶层使用 `lain.support.js` 导出同样的按钮类。此方式适合插件作者把扩展和自己的插件一起发布。个人配置或跨插件快捷入口建议放在 `plugins/button/<文件名>.js`，并用 `requiredPlugin` 声明目标插件。两种来源使用同一套 `plugin.rule` 和按钮构造方式。
+也可以在插件包顶层使用 `lain.support.js` 导出同样的按钮类。此方式适合插件作者把扩展和自己的插件一起发布。个人配置或跨插件快捷入口建议放在 `plugins/button/example/<文件名>.js`，并用 `requiredPlugin` 声明目标插件。两种来源使用同一套 `plugin.rule` 和按钮构造方式。
 
 ## 排查
 
@@ -240,7 +264,7 @@ requiredPlugin: 'miao-plugin'
 - 回复中已经提供 `keyboard` 或 `button` 时，不再叠加规则按钮；`e.reply(msg, { markdown: true })` 也支持自动按钮。
 - 检查 `rule.reg` 是否匹配当前 `e.msg`，以及 `fnc` 方法是否返回按钮。
 - 检查目标插件的目录名是否与 `requiredPlugin` 完全相同。
-- 只有顶层 `.js` 文件会被 `plugins/button` 加载；文件放在子目录时不会自动递归读取。
+- 顶层 `.js` 和 `example` 下任意层级的 `.js` 会加载；其他子目录、隐藏目录及 node_modules 不会加载。
 - 点击后无响应时，确认按钮是输入动作且 `data` 是插件可识别的指令；回调动作则检查 QQBot interaction 事件权限。
 - 回调按钮点击成功但机器人未回复时，查看日志中的“QQBot 按钮互动回应失败”或“QQBot 按钮命令处理失败”；回调回复使用官方互动 ID，并会按群聊或私聊消息交给插件。
 - 同一 AppID 同时接入 QQ 群和频道时，按钮互动按官方 `scene` 分流；群和 C2C 按钮由 QQBot 适配器处理，频道按钮由 QQGuild 适配器处理。

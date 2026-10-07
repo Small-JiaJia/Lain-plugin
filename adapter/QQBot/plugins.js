@@ -6,6 +6,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const pluginRoot = path.resolve(__dirname, '../..')
 import chokidar from 'chokidar'
+import { ensureButtonRepository } from '../../scripts/button-repository.js'
 
 class Button {
   constructor () {
@@ -113,6 +114,7 @@ class Button {
   /** 初始化 */
   async initialize () {
     try {
+      ensureButtonRepository(pluginRoot)
       const filesList = []
       /** 遍历插件目录 */
       const List = fs.readdirSync(this.plugin)
@@ -159,7 +161,7 @@ class Button {
     return path.resolve(left) === path.resolve(right)
   }
 
-  /** 只接受 button 目录顶层 JS 文件，并返回模块列表使用的稳定路径。 */
+  /** 加载顶层扩展，以及 example 下任意层级的自定义扩展。 */
   getButtonRelativePath (filePath) {
     const buttonDir = path.resolve(this.plugin, 'button')
     const normalized = this.normalizeFilePath(filePath)
@@ -168,7 +170,9 @@ class Button {
       : path.resolve(pluginRoot, normalized)
     const relative = path.relative(buttonDir, absolute)
     if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return ''
-    if (relative.includes(path.sep) || !relative.toLowerCase().endsWith('.js')) return ''
+    const parts = relative.split(path.sep)
+    if (parts.some(part => part.startsWith('.') || part === 'node_modules')) return ''
+    if ((parts.length > 1 && parts[0] !== 'example') || !relative.toLowerCase().endsWith('.js')) return ''
     return `plugins/button/${this.normalizeFilePath(relative)}`
   }
 
@@ -218,9 +222,19 @@ class Button {
     for (const file of btnFiles) {
       await this.reloadButtonFile(path.join(buttonDir, file), 'add')
     }
+    const scanExample = async directory => {
+      if (!fs.existsSync(directory)) return
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        const file = path.join(directory, entry.name)
+        if (entry.isDirectory()) await scanExample(file)
+        else if (entry.isFile() && entry.name.toLowerCase().endsWith('.js')) await this.reloadButtonFile(file, 'add')
+      }
+    }
+    await scanExample(path.join(buttonDir, 'example'))
 
     this.buttonWatcher = chokidar.watch(buttonDir, {
-      ignored: /[\/\\]\./,
+      ignored: /(?:[\/\\]\.|[\/\\]node_modules(?:[\/\\]|$))/,
       persistent: true,
       ignoreInitial: true
     })

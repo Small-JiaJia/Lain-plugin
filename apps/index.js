@@ -1,6 +1,7 @@
 import YamlParse from '../model/YamlHandler.js'
 import { execSync } from 'child_process'
 import { update as Update } from '../../other/update.js'
+import { prepareButtonUpdate, ensureButtonRepository } from '../scripts/button-repository.js'
 import { xiaofei_music } from '../adapter/shamrock/xiaofei/music.js'
 import { xiaofei_weather } from '../adapter/shamrock/xiaofei/weather.js'
 
@@ -39,8 +40,14 @@ export class Lain extends plugin {
       }
     } else {
       if (new_update.getPlugin(name)) {
-        if (this.e.msg.includes('强制')) { execSync('git reset --hard', { cwd: `${process.cwd()}/plugins/${name}/` }) }
-        await new_update.runUpdate(name)
+        const root = `${process.cwd()}/plugins/${name}`
+        prepareButtonUpdate(root)
+        try {
+          if (this.e.msg.includes('强制')) { execSync('git reset --hard', { cwd: `${process.cwd()}/plugins/${name}/` }) }
+          await new_update.runUpdate(name)
+        } finally {
+          ensureButtonRepository(root)
+        }
         if (new_update.isUp) { setTimeout(() => new_update.restart(), 2000) }
       }
     }
