@@ -70,13 +70,8 @@ export default class Button {
     const label = btn.text ?? btn.label ?? btn.link ?? ''
 
     // 确定 action type: 0=link, 1=callback, 2=input
-    let type = btn.type
-    if (type == null) {
-      if (btn.link) type = 0
-      else if (btn.callback) type = 1
-      else type = 2
-    }
-    type = Number(type)
+    const type = btn.link ? 0 : btn.callback != null ? 1 :
+      (btn.data != null || btn.input != null ? 2 : Number(btn.type ?? 2))
 
     // 确定 data
     // action.data 必须与动作类型一致；避免带 data 的网页按钮把命令当 URL 打开。
@@ -89,7 +84,7 @@ export default class Button {
     // 确定 enter
     let enter = btn.send ?? btn.enter
     if (enter == null) {
-      enter = type === 2 ? true : false
+      enter = false
     }
 
     // 确定 permission

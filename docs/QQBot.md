@@ -68,7 +68,7 @@ token:
   "你的AppID":
     maxRetry: 10       # WebSocket 连续失败重试次数；0 表示不限次数
     timeout: 10000     # OpenAPI 和文件分片请求超时，单位毫秒
-    toCallback: true   # callback 按钮是否转换为 interaction
+    toCallback: true   # QQGuild 频道兼容选项；QQ群/C2C 的 callback 始终是回调
     other:
       Prefix: true     # 将 /命令转换为 #命令
 ```
@@ -94,13 +94,32 @@ await e.markdown('请选择操作：', {
 
 图片、语音和视频需要可供 QQ 平台访问的公网 URL。可通过 `Bot.imageToUrl`、`Bot.audioToUrl`、`Bot.videoToUrl` 提供自定义转换，也可按 Lain-plugin 配置启用公网临时文件服务。具体代码示例见仓库内的 `plugins/纯文模板.js` 和 `plugins/纯文模板-优化混排.js`。
 
+## 群成员进退群通知
+
+群聊模式自动订阅 `GROUP_MEMBER_EVENT (1 << 24)` 和 `GROUP_AND_C2C_EVENT (1 << 25)`，WebSocket 与 WebHook 都使用同一解析路径。
+
+| 官方事件 | ICQQ / YunZai 通知 | `user_id` 的含义 |
+| --- | --- | --- |
+| `GROUP_MEMBER_ADD` | `notice.group.increase` | 加入的成员 |
+| `GROUP_MEMBER_REMOVE` | `notice.group.decrease` | 离开的成员 |
+| `GROUP_ADD_ROBOT` | `notice.group.increase` | 机器人自身 |
+| `GROUP_DEL_ROBOT` | `notice.group.decrease` | 机器人自身 |
+
+通知包含 `post_type: 'notice'`、`notice_type: 'group'`、`sub_type`、`group_id`、`user_id`、Unix 秒级 `time` 和可调用的 `group` 对象。`qqbot_event_type` 保留官方事件名，`qqbot_is_robot_change` 表示是否为机器人自身进退群。机器人事件的 `op_member_openid` 只映射为 `operator_id`，不会被误当成进退群成员；成员事件没有操作人字段时不猜测操作人，也无法据此区分主动退群和被踢。
+
+原始 `group_openid`、`member_openid`、`user_openid`、`operator_openid` 和 `raw` 均保留。成员身份使用 `member_openid`，不把可能为空的 `user_openid` 当作 C2C 可用身份。未启用身份转译时使用 AppID 加 OpenID 的标识；群已启用 ICQQ 身份转译且有保存的映射时，群、机器人、成员与操作人分别转换为已知 QQ 号，未知成员仍保留 OpenID 标识。通知不进入消息配对或消息插件执行层。
+
+只有机器人进退群才更新机器人群列表；普通成员退群不会删除机器人所在群。插件可以监听 `notice.group.increase` 或 `notice.group.decrease`，通过 `e.qqbot_is_robot_change` 区分对象，并用 `e.group.sendMsg()` 或 `e.reply()` 发送消息。通知中的发送采用主动群消息规则，需群开启主动推送并通过权限检查。
+
+参考官方[机器人加入群聊](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_add_robot.html)、[机器人退出群聊](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_del_robot.html)、[群成员加入](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_member_add.html)和[群成员退出](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_member_remove.html)。
+
 ## QQ 群全量消息与 @ 机器人消息
 
 QQBot 将 `GROUP_AT_MESSAGE_CREATE`（群 @ 机器人）和 `GROUP_MESSAGE_CREATE`（群全量消息）作为不同 Gateway 事件处理。适配器把原始事件名保存在 `e.qqbot_event_type`，并提供 `e.qqbot_is_group_at`、`e.qqbot_is_group_all` 两个布尔值。`e.atme` 表示这条消息调用了机器人。
 
-收到群消息时，适配器调用官方 `GET /v2/groups/{group_openid}/bot_state`，并在事件上设置 `e.qqbot_group_state`、`e.qqbot_recv_msg_setting`（`all`、`only_mention` 或 `mention_and_context`）和 `e.qqbot_allow_proactive_msg`。状态短暂缓存 15 秒，避免超过官方 30 QPM 限制。接口未开放时，`e.qqbot_group_state_error` 记录原因；全量事件仍按自身事件类型决定按钮行为。该接口仅对获白名单权限的机器人开放。
+收到群消息时，适配器调用官方 `GET /v2/groups/{group_openid}/bot_state`，并在事件上设置 `e.qqbot_group_state`、`e.qqbot_recv_msg_setting`（`all`、`only_mention` 或 `mention_and_context`）和 `e.qqbot_allow_proactive_msg`。状态短暂缓存 15 秒，避免超过官方 30 QPM 限制。接口未开放时，`e.qqbot_group_state_error` 记录原因；全量事件仍保留自身事件类型。该接口仅对获白名单权限的机器人开放。
 
-私聊中的普通指令按钮自动改用回调动作，点击后用户无需发送消息；群回复的指令按钮在 `recv_msg_setting=all` 时也自动改用回调，点击不会由 QQ 客户端插入 `@bot`。显式 mqqapi 内联命令保留原生输入动作。其他群接收类型保留官方指令按钮行为。回调事件在兼容层中标记 `atme=true`，但消息数组不会传入一个指向机器人自己的 `at` 段。回调回复使用 Gateway 最外层事件 ID，属于被动回复；互动事件体的 `d.id` 只用于 PUT 确认。主动调用 `Bot[appid].pickGroup(groupOpenID).sendMsg(...)` 时先检查 `allow_proactive_msg`，未开启或无法查询时抛出明确错误；被动回复仍使用消息或事件 ID。
+按钮由定义字段决定动作：`data` / `input` 是普通可输入按钮，默认不立即发送；`callback` 是回调按钮，点击后用户不发送聊天消息。私聊和群聊均保留作者指定的动作，不因 `recv_msg_setting` 自动转换。原生官方按钮保留 `action.type`，mqqapi 内联命令保留输入动作。回调事件在兼容层中标记 `atme=true`，但消息数组不会传入一个指向机器人自己的 `at` 段。回调回复使用 Gateway 最外层事件 ID，属于被动回复；互动事件体的 `d.id` 只用于 PUT 确认。主动调用 `Bot[appid].pickGroup(groupOpenID).sendMsg(...)` 时先检查 `allow_proactive_msg`，未开启或无法查询时抛出明确错误；被动回复仍使用消息或事件 ID。
 
 开启 `other.Prefix` 后，入站消息和按钮回调开头的 `/命令` 会转换成 `#命令`。需要保留斜杠时，在前面输入反斜杠：`\/命令` 会传给插件为 `/命令`。这个反转义在 `other.Prefix` 关闭时也可用。回调在 ICQQ 身份兼容层中只向插件传递一次命令文本。
 

@@ -9,7 +9,7 @@ default:
     token:                                # 机器人令牌
     secret:                               # 机器人密钥
     maxRetry: 10                          # 重连次数
-    toCallback: true                      # 按钮callback通过interaction转换为消息
+    toCallback: true                      # QQGuild频道callback兼容选项；QQ群/C2C显式callback始终使用回调
     other:                                # 其他配置
       Prefix: true                        # QQ频道、QQ群Bot前缀转换 [/] => [#]   true-开启  false-关闭
       QQCloud:                            # QQ群Bot => QQ图床，填写QQ号。需使用QQ发送图片

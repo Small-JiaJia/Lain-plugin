@@ -40,6 +40,7 @@ export default class QQSDK {
     if (this.config.model == 0 || this.config.model == 2) {
       /** 群聊和单聊事件 */
       this.config.intents.push('GROUP_AND_C2C_EVENT')
+      this.config.intents.push('GROUP_MEMBER_EVENT')
       /** 可选接收群内全量消息；与需要 @ 机器人的默认群事件分开订阅。 */
       if (this.config.groupAllMsg) this.config.intents.push('GROUP_MESSAGE_CREATE')
     }
@@ -243,6 +244,27 @@ export default class QQSDK {
     }
     // 群全量消息与群 @ 事件是不同的 gateway event / intent。
     if (Constans.Intends.GROUP_MESSAGE_CREATE === undefined) Constans.Intends.GROUP_MESSAGE_CREATE = 1 << 24
+    if (Constans.Intends.GROUP_MEMBER_EVENT === undefined) Constans.Intends.GROUP_MEMBER_EVENT = 1 << 24
+
+    // 成员事件与机器人事件使用相同的 ICQQ 通知名，由原始事件名区分对象。
+    EventIndex.QQEvent.GROUP_MEMBER_ADD = 'notice.group.increase'
+    EventIndex.QQEvent.GROUP_MEMBER_REMOVE = 'notice.group.decrease'
+    for (const eventName of ['notice.group.increase', 'notice.group.decrease']) {
+      EventIndex.EventParserMap.set(eventName, function (event, payload) {
+        return {
+          ...payload,
+          bot: this,
+          post_type: 'notice',
+          notice_type: 'group',
+          sub_type: event.split('.').at(-1),
+          group_id: payload.group_openid,
+          user_id: payload.member_openid,
+          operator_id: payload.op_member_openid,
+          // 官方事件的 timestamp 已经是秒，旧版 SDK 会再除以 1000。
+          time: Number(payload.timestamp) || Math.floor(Date.now() / 1000)
+        }
+      })
+    }
 
     /** GROUP_MESSAGE_CREATE 与 GROUP_AT_MESSAGE_CREATE 的 payload 同为群消息结构 */
     if (!EventIndex.QQEvent.GROUP_MESSAGE_CREATE) {
@@ -282,7 +304,8 @@ export default class QQSDK {
     if (!dispatchEvent || dispatchEvent._lainEventTypeWrapped) return
 
     const wrapped = function (event, wsRes) {
-      if (['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE'].includes(event) && wsRes?.d) {
+      if (['GROUP_AT_MESSAGE_CREATE', 'GROUP_MESSAGE_CREATE', 'C2C_MESSAGE_CREATE',
+        'GROUP_ADD_ROBOT', 'GROUP_DEL_ROBOT', 'GROUP_MEMBER_ADD', 'GROUP_MEMBER_REMOVE'].includes(event) && wsRes?.d) {
         wsRes = {
           ...wsRes,
           d: { ...wsRes.d, qqbot_event_type: event }

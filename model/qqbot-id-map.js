@@ -342,6 +342,43 @@ class QQBotIdMap {
     setTimeout(() => recentQQBotPrivate.delete(record.key), WAIT_MS * 3)
   }
 
+  /** 通知只转换已保存的身份，不进入消息配对队列，也不构造 message 字段。 */
+  static applyQQBotGroupNoticeMapping (e) {
+    const selfId = String(e.self_id || '')
+    if (!this.isGroupEnabled(selfId, e.group_openid)) return false
+    const groupOpenid = this.normalizeOpenid(e.group_openid, selfId)
+    const group = this.data.groups[selfId]?.[groupOpenid]
+    const groupQQ = this.normalizeQQ(group?.group_qq)
+    if (!groupQQ) return false
+
+    const botQQ = this.getEffectiveQQSelfId(selfId, group)
+    const memberOpenid = this.normalizeOpenid(e.member_openid || e.user_id, selfId)
+    const operatorOpenid = this.normalizeOpenid(e.operator_openid, selfId)
+    const userQQ = e.qqbot_is_robot_change ? botQQ : this.normalizeQQ(this.data.users[selfId]?.[memberOpenid]?.qq)
+    const operatorQQ = this.normalizeQQ(this.data.users[selfId]?.[operatorOpenid]?.qq)
+    e.qqbot_self_id = selfId
+    e.qqbot_appid = selfId
+    e.qqbot_bot = e.bot
+    e.openid_group_id = e.group_id
+    e.openid_user_id = e.user_id
+    e.openid_operator_id = e.operator_id
+    e.group_id = groupQQ
+    e.group = { ...e.group, group_id: groupQQ }
+    if (group.group_name) e.group_name = group.group_name
+    if (userQQ) e.user_id = userQQ
+    if (operatorQQ) e.operator_id = operatorQQ
+    if (e.member && userQQ) e.member = { ...e.member, group_id: groupQQ, user_id: userQQ }
+    if (botQQ) {
+      e.self_id = botQQ
+      e.uin = botQQ
+      e.bot = this.withQQBotAdapterMarker(this.ensureQQSelfBotAlias({
+        qq_self_id: botQQ, qqbot_self_id: selfId, qqbot_bot: e.qqbot_bot
+      }), e.qqbot_bot, botQQ)
+      e.adapter = group.qq_adapter || 'OneBotV11'
+    }
+    return true
+  }
+
   static async handleQQBotGroupMessage (e, emit) {
     if (!this.isGroupMessage(e) || this.isQQBotSelfMessage(e)) {
       await emit(e)

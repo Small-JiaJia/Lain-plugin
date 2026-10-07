@@ -174,12 +174,21 @@ export default class adapterQQBot {
     const [, scene = '', subType = ''] = String(event).split('.')
     const isGroup = scene === 'group'
     const rawGroupId = data.group_id || data.group_openid
-    const rawUserId = data.user_id || data.openid || data.operator_id || data.op_member_openid
-    const rawOperatorId = data.operator_id || data.op_member_openid || rawUserId
+    const isRobotChange = isGroup && ['increase', 'decrease'].includes(subType) &&
+      (['GROUP_ADD_ROBOT', 'GROUP_DEL_ROBOT'].includes(data.qqbot_event_type) ||
+        (!data.member_openid && !['GROUP_MEMBER_ADD', 'GROUP_MEMBER_REMOVE'].includes(data.qqbot_event_type)))
+    const rawUserId = isGroup
+      ? (isRobotChange ? undefined : data.member_openid || data.user_id)
+      : data.user_id || data.openid || data.operator_id
+    const rawOperatorId = data.operator_id || data.op_member_openid
     const groupId = isGroup ? this.formatQQBotId(rawGroupId) : undefined
-    // 群增减事件表示机器人自身加入/离开，官方载荷没有 user_id。
-    const userId = rawUserId ? this.formatQQBotId(rawUserId) : (isGroup ? this.id : undefined)
-    const operatorId = rawOperatorId ? this.formatQQBotId(rawOperatorId) : (isGroup ? this.id : undefined)
+    if (isGroup && (!groupId || (!isRobotChange &&
+      ['increase', 'decrease'].includes(subType) && !rawUserId))) {
+      lain.warn(this.id, '[QQBot] 忽略缺少群或成员身份的群通知')
+      return false
+    }
+    const userId = isRobotChange ? this.id : this.formatQQBotId(rawUserId)
+    const operatorId = this.formatQQBotId(rawOperatorId)
     const time = Number(data.time || data.timestamp) || Date.now()
     const notice = {
       ...data,
@@ -195,15 +204,35 @@ export default class adapterQQBot {
       user_id: userId,
       operator_id: operatorId,
       group_openid: rawGroupId || '',
-      user_openid: rawUserId || '',
+      user_openid: isGroup ? (data.user_openid ?? '') : rawUserId || '',
+      member_openid: data.member_openid || '',
       operator_openid: rawOperatorId || '',
+      qqbot_is_robot_change: isRobotChange,
       adapter: 'QQBot',
     }
 
     if (isGroup && groupId) {
-      if (subType === 'increase') Bot[this.id]?.gl.set(groupId, { group_id: groupId })
-      if (subType === 'decrease') Bot[this.id]?.gl.delete(groupId)
+      if (isRobotChange && subType === 'increase') Bot[this.id]?.gl.set(groupId, { group_id: groupId })
+      if (isRobotChange && subType === 'decrease') {
+        Bot[this.id]?.gl.delete(groupId)
+        Bot[this.id]?.gml.delete(groupId)
+        this.groupBotStateCache?.delete(this.stripQQBotId(rawGroupId))
+      }
       notice.group = this.pickGroup(rawGroupId)
+      notice.group.group_id = groupId
+      notice.nickname = data.nickname || ''
+      if (subType === 'decrease') notice.dismiss = false
+      if (rawUserId) {
+        notice.member = {
+          ...this.pickMember(rawGroupId, rawUserId),
+          group_id: groupId,
+          user_id: userId,
+          nickname: notice.nickname
+        }
+        if (subType === 'decrease') Bot[this.id]?.gml.get(groupId)?.delete(userId)
+      }
+      notice.reply = msg => notice.group.sendMsg(msg)
+      QQBotIdMap.applyQQBotGroupNoticeMapping(notice)
     } else if (!isGroup && userId) {
       if (subType === 'increase') Bot[this.id]?.fl.set(userId, { user_id: userId })
       if (subType === 'decrease') Bot[this.id]?.fl.delete(userId)
@@ -1904,7 +1933,7 @@ export default class adapterQQBot {
             link: inlineCommand ? undefined : btn.link,
             callback: btn.callback,
             input: inlineCommand?.command ?? btn.input ?? (!btn.link && btn.callback == null ? btn.data : undefined),
-            send: inlineCommand?.enter ?? btn.send ?? btn.enter ?? (!btn.link && btn.callback == null && btn.data != null ? true : undefined),
+            send: inlineCommand?.enter ?? btn.send ?? btn.enter ?? false,
             permission: btn.permission ?? (btn.admin ? 'admin' : btn.list),
             style: btn.style,
             tips: btn.tips ?? btn.unsupport_tips,
@@ -2622,46 +2651,26 @@ export default class adapterQQBot {
       },
     }
 
-    if (btn.input) {
+    if (btn.callback != null) {
+      msg.action = {
+        type: 1,
+        permission: { type: 2 },
+        data: btn.callback,
+        enter: false,
+        unsupport_tips: btn.tips || '暂不支持此按钮',
+        ...(btn.QQBot?.action || {}),
+      }
+      msg.action.type = 1
+    } else if (!btn.link && (btn.input != null || btn.data != null)) {
       msg.action = {
         type: 2,
         permission: { type: 2 },
-        data: btn.input,
+        data: btn.input ?? btn.data,
         enter: keepInput ? false : !!btn.send,
         unsupport_tips: btn.tips || '暂不支持此按钮',
         ...(btn.QQBot?.action || {}),
       }
-    } else if (btn.callback) {
-      if (keepInput) {
-        msg.action = {
-          type: 2,
-          permission: { type: 2 },
-          data: btn.callback,
-          enter: false,
-          reply: false,
-          unsupport_tips: btn.tips || '暂不支持此按钮',
-          ...(btn.QQBot?.action || {}),
-        }
-      } else if (this.config.toCallback !== false) {
-        msg.action = {
-          type: 1,
-          permission: { type: 2 },
-          data: btn.callback,
-          enter: false,
-          unsupport_tips: btn.tips || '暂不支持此按钮',
-          ...(btn.QQBot?.action || {}),
-        }
-        this._trackCallback(e, msg.id, btn.callback)
-      } else {
-        msg.action = {
-          type: 2,
-          permission: { type: 2 },
-          data: btn.callback,
-          enter: true,
-          unsupport_tips: btn.tips || '暂不支持此按钮',
-          ...(btn.QQBot?.action || {}),
-        }
-      }
+      msg.action.type = 2
     } else if (btn.link) {
       msg.action = {
         type: 0,
@@ -2706,6 +2715,8 @@ export default class adapterQQBot {
       action?.inputOnly,
       action?.input_only
     ].find(value => value !== undefined)
+    // callback 是作者明确选择的动作，不能按命令内容猜测成输入按钮。
+    if (Number(action.type) === 1 || button?.callback != null) return false
     if (explicit !== undefined) return !!explicit
 
     const inferredType = button?.link
@@ -2731,11 +2742,11 @@ export default class adapterQQBot {
       /[^换\s]{2,}换[^换\s]{1,}/i.test(text)
   }
 
-  /** 私聊和全量接收群的普通指令按钮使用回调，避免客户端发送指令或自动插入 @bot。 */
+  /** 保留作者指定的动作类型；只有回调按钮需要登记互动上下文。 */
   normalizeConversationButtonAction (e, button, preserveInput = false, requiresInput) {
     const keepInput = requiresInput ?? this.isInputRequiredButton(button)
     const actionType = Number(button?.action?.type)
-    if (keepInput && [1, 2].includes(actionType)) {
+    if (keepInput && actionType === 2) {
       const normalized = {
         ...button,
         action: {
@@ -2753,15 +2764,14 @@ export default class adapterQQBot {
       return normalized
     }
 
-    const convert = !preserveInput && Number(button?.action?.type) === 2 &&
-      (!e?.group_id || e.qqbot_recv_msg_setting === 'all')
-    if (!convert && Number(button?.action?.type) !== 1) return button
+    if (actionType === 2) return button
+    if (actionType !== 1) return button
     if (String(button.id).startsWith('bt_') && Bot[this.id]?.callback?.[button.id]) return button
     const id = 'bt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
     const converted = {
       ...button,
       id,
-      action: convert ? { ...button.action, type: 1, enter: false, reply: false } : button.action
+      action: { ...button.action, enter: false, reply: false }
     }
     this._trackCallback(e, id, converted.action.data)
     return converted

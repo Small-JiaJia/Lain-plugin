@@ -14,9 +14,17 @@ QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的
 | 回调 | `callback` | 触发 QQBot `interaction` 回调，再作为消息交给 YunZai 插件 |
 | 链接 | `link` | 打开 HTTP/HTTPS 网页 |
 
-`data` 默认作为输入按钮发送，适合执行 YunZai 指令。按钮行最多 5 个按钮，键盘最多 5 行。私聊中的普通指令按钮自动改为回调按钮，点击后用户不会发送聊天消息；群状态接口返回 `recv_msg_setting=all` 时，群内指令按钮也会改为回调，避免客户端自动插入 `@bot`。其他群接收类型保留官方指令按钮行为。显式 `mqqapi://aio/inlinecmd` 保留原生输入动作。回调按钮会生成唯一 ID，并保留原消息所在会话。
+`data` 或 `input` 始终构建普通指令按钮（`action.type: 2`），默认只把文本填入输入框；设置 `send: true` 或 `enter: true` 才立即发送。`callback` 始终构建回调按钮（`action.type: 1`），点击后触发互动事件，用户不发送聊天消息。私聊、群 @ 消息和群全量消息使用相同规则，不会根据会话类型自动转换动作。原生官方按钮按 `action.type` 保留动作，`action.data` 是所有动作共有的数据字段，不等同于简写的 `data`。按钮行最多 5 个按钮，键盘最多 5 行。显式 `mqqapi://aio/inlinecmd` 保留输入动作。
 
-需要用户继续填写参数的按钮会保留为普通输入按钮，点击后只把命令放入输入框，不会立即执行。适配器会识别“绑定/切换 UID”“登录账号”“面板更换”等常见入口，并排除扫码、帮助和“换一批”等无需填写内容的操作。自定义按钮建议显式标记 `requiresInput: true`；`inputOnly`、`requires_input` 也可用：
+```js
+[
+  { label: '绑定 UID', data: '/绑定' }, // 填入输入框，等待补充 UID
+  { label: '发送帮助', data: '/帮助', send: true }, // 用户发送聊天消息
+  { label: '更新面板', callback: '/更新面板' } // 触发回调，由机器人执行
+]
+```
+
+需要用户继续填写参数的输入按钮点击后只把命令放入输入框，不会立即执行。适配器会识别“绑定/切换 UID”“登录账号”“面板更换”等常见入口，并排除扫码、帮助和“换一批”等无需填写内容的操作。自定义按钮建议显式标记 `requiresInput: true`；`inputOnly`、`requires_input` 也可用：
 
 ```js
 {
@@ -26,7 +34,7 @@ QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的
 }
 ```
 
-如果某个按钮命令虽然包含上述关键词、但不需要输入，可设置 `requiresInput: false` 覆盖自动判断。
+如果某个输入按钮命令虽然包含上述关键词、但不需要补充参数，可设置 `requiresInput: false` 并配合 `send: true` 立即发送。此标记不会把显式 `callback` 改为输入按钮；需要补充参数时请使用 `data`。
 
 回调点击会产生 `INTERACTION_CREATE` 事件。机器人先用事件体 `d.id` 确认互动，再用 Gateway 事件最外层的 `id` 作为消息接口的 `event_id` 被动回复。这两个 ID 不可混用，否则消息接口可能返回 `40034025`。该回复受官方被动回复时效和次数限制；脱离入站消息或互动上下文发送的消息按主动消息处理。参考[官方互动事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)和[单聊消息发送接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html)。
 
@@ -128,7 +136,7 @@ await e.markdown(
 
 普通指令按钮和回调按钮不会使用第三方应用跳转动作。适配器只会对 `mqqapi://aio/inlinecmd` 做协议解析并转换为原生输入按钮；显式填写的 HTTP/HTTPS `link` 仍按网页链接处理。
 
-官方群消息接口标注 `enter` 和 `reply` 的新客户端自动发送选项仅支持单聊；群内按钮以客户端实际行为为准。群全量模式使用回调，因此无需依赖群内 `enter` 自动发送。
+官方按钮文档中，`enter` 控制指令按钮是否自动发送，`reply` 控制是否引用原消息，两者默认都是 `false`，需要支持这些字段的 QQ 客户端版本。普通指令按钮的 @ 和输入行为由客户端处理；需要点击后不产生用户聊天消息时，请明确使用 `callback`。
 
 ## 回调按钮测试
 
@@ -213,7 +221,7 @@ requiredPlugin: 'miao-plugin'
 | `label` / `text` | 按钮显示文字 |
 | `data` / `input` | 输入到当前会话的文本 |
 | `send` / `enter` | 是否点击后立即发送输入文本 |
-| `requiresInput` / `inputOnly` / `requires_input` | 保留为输入按钮，不转换为点击即执行的回调；可设为 `false` 覆盖自动判断 |
+| `requiresInput` / `inputOnly` / `requires_input` | 输入按钮需要继续填写参数，强制关闭自动发送；可设为 `false` 覆盖自动判断，显式 `callback` 不受影响 |
 | `callback` | 回调按钮的数据，触发 interaction 事件 |
 | `link` | HTTP/HTTPS 网页地址；mqqapi inlinecmd 会转为输入按钮 |
 | `style` | 样式数值；`Bot.Button()` 常用 `0` 灰色、`1` 蓝色，具体可用值以 QQ 客户端为准 |
