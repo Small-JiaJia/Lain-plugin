@@ -686,7 +686,12 @@ class QQBotIdMap {
 
     if (isGroup) {
       const pickedGroup = typeof bot?.pickGroup === 'function' ? bot.pickGroup(groupQQ) : null
+      const qqbotGroup = e.group
       e.group = this.mergeApiObject(e.group, pickedGroup)
+      // 消息仍来自 QQBot：这些接口必须保留原始 OpenID 场景，不能被原生 ICQQ 覆盖。
+      for (const method of ['recallMsg', 'muteMember', 'getMsg', 'getChatHistory']) {
+        if (typeof qqbotGroup?.[method] === 'function') e.group[method] = qqbotGroup[method].bind(qqbotGroup)
+      }
       e.group_id = groupQQ
       e.group_name = e.group_name || e.group?.name || String(groupQQ)
       // ICQQ 兼容层也提供异步群权限方法。优先复用原生 QQBot 群对象，

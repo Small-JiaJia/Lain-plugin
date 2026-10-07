@@ -960,6 +960,36 @@ export default class adapterQQBot {
     }
   }
 
+  /** 发送响应的 ext_info.ref_idx 可还原用户后来引用的机器人消息 ID。 */
+  async cacheSentMessage (type, targetId, result, message = []) {
+    const id = result?.id || result?.message_id
+    if (!id) return
+    const target = await this.getMessageCacheTarget(type, targetId)
+    const msgIdx = result?.ext_info?.ref_idx
+    const record = {
+      id: String(id),
+      message_id: String(id),
+      msg_idx: msgIdx,
+      seq: String(id),
+      time: Math.floor(new Date(result.timestamp).getTime() / 1000),
+      message: Array.isArray(message) ? message : [message],
+      user_id: this.id,
+      group_id: type === 'group' ? target : undefined,
+      message_type: type === 'group' ? 'group' : 'private'
+    }
+    try {
+      const value = JSON.stringify(record)
+      const writes = [
+        redis.set(this.getMessageCacheKey(type, target, 'id', id), value, { EX: MESSAGE_CACHE_TTL }),
+        redis.set(`lain:qqbot:message:${this.id}:id:${id}`, value, { EX: MESSAGE_CACHE_TTL })
+      ]
+      if (msgIdx) writes.push(redis.set(this.getMessageCacheKey(type, target, 'idx', msgIdx), value, { EX: MESSAGE_CACHE_TTL }))
+      await Promise.all(writes)
+    } catch {
+      // 缓存失败不能影响已成功发送的消息；引用撤回会明确提示缓存未命中。
+    }
+  }
+
   /**
    * 撤回群消息。
    * https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages_message_id.delete.html
@@ -973,7 +1003,7 @@ export default class adapterQQBot {
       `/v2/groups/${encodeURIComponent(groupOpenid)}/messages/${encodeURIComponent(messageId)}`
     )
     // 官方接口成功时返回 HTTP 200，且没有响应体。
-    return response.status === 200
+    return this.checkRecallResponse(response)
   }
 
   /** 撤回私聊消息。 */
@@ -985,7 +1015,15 @@ export default class adapterQQBot {
     const response = await this.sdk.request.delete(
       `/v2/users/${encodeURIComponent(userOpenid)}/messages/${encodeURIComponent(messageId)}`
     )
-    return response.status === 200
+    return this.checkRecallResponse(response)
+  }
+
+  checkRecallResponse (response) {
+    const code = response?.data?.err_code ?? response?.data?.code
+    if (code !== undefined && Number(code) !== 0) {
+      throw new Error(`QQBot 撤回失败（${code}）：${response.data.message || response.data.msg || '接口拒绝撤回'}`)
+    }
+    return response?.status === 200
   }
 
   /** QQ 富媒体文件：上传后通过 msg_type=7 发送 file_info。 */
@@ -1130,6 +1168,7 @@ export default class adapterQQBot {
     }
     const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
     if (!data?.id) throw new Error('QQBot 文件消息发送失败：响应中没有消息 ID')
+    await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, data, [{ type: 'file', name: uploaded.name }])
     return { ...data, file_id: uploaded.file_uuid, file_info: uploaded.file_info }
   }
 
@@ -2307,6 +2346,7 @@ export default class adapterQQBot {
       // 避免其额外写入 C2C 暂不支持的 message_reference 字段。
       const sdkSource = !useEventReply && sourceMessageId ? { id: sourceMessageId } : undefined
       const sent = await send(encodeURIComponent(targetId), sendable, sdkSource)
+      await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, sent, normalContent)
       result ||= sent
     }
     if (!result) throw new Error('QQBot 消息内容为空')

@@ -32,12 +32,11 @@ export class RecallTest extends plugin {
     }
 
     const isTest = /测试/.test(String(e.msg || e.raw_message || ''))
-    let reference = getRecallReference(e)
-    if (!reference && !isTest) {
-      return await e.reply('请先引用一条机器人发送的消息，再发送 #撤回；也可以发送 #测试撤回。')
-    }
-
     try {
+      let reference = getRecallReference(e)
+      if (!reference && !isTest) {
+        return await e.reply('请先引用一条机器人发送的消息，再发送 #撤回；也可以发送 #测试撤回。')
+      }
       if (!reference) {
         reference = await e.reply('这是一条撤回测试消息。')
         if (!reference) throw new Error('测试消息发送失败，未返回消息信息')
