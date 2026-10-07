@@ -238,6 +238,8 @@ C2C 主要接口和行为：
 
 QQ 官方暂未提供可等价替代的历史消息接口，因此 `getChatHistory` 目前只会返回命中的锚点消息，不会拉取完整历史。`e.recall()`、`e.group.recallMsg()` 和 `e.friend.recallMsg()` 可撤回对应消息；引用消息的 `ref_msg_idx` 会在缓存命中后恢复为真实消息 ID。Redis 不可用时不影响正常收发，但跨进程的引用和缓存查询可能失败。
 
+引用撤回与撤回测试统一由 `apps/recall.js` 处理，使用 `e.group.recallMsg()` / `e.friend.recallMsg()`，不直接访问 QQBot SDK。引用机器人消息发送 `#撤回` 或 `#引用撤回`；无引用发送 `#测试撤回` 会发送测试消息并立即撤回，有引用时撤回被引用消息。旧命令 `#QQBot测试撤回`、`#QQBot撤回测试` 仍可使用，命令不再限制适配器。原生 ICQQ 的引用保留 `seq/rand/time/pktnum`，其他适配器优先使用实际消息 ID。实际撤回仍受平台权限和时间限制约束，不支持撤回的适配器会明确报错。
+
 ## QQ 与 QQBot 用户映射
 
 转换记录按机器人、群和成员 OpenID 保存。用户有映射时，适配器会在该群的 QQBot 事件和 ICQQ 事件间建立对应关系。

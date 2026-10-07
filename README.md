@@ -56,6 +56,8 @@ git -C plugins/button status
 
 发送 `#回调按钮测试` 可查看仓库自带的回调按钮示例，点击“测试回调 +1”后会收到确认回复。
 
+撤回测试已统一：引用机器人消息发送 `#撤回`（或 `#引用撤回`）；发送 `#测试撤回` 会发送一条测试消息并撤回，带引用时则撤回引用消息。`#QQBot测试撤回` 和 `#QQBot撤回测试` 保留为别名。群聊、私聊及各适配器统一调用 ICQQ 风格的 `recallMsg`；适配器不支持或平台拒绝撤回时会回复失败原因。
+
 ## ws-plugin 兼容补丁
 
 仓库中的 `ws-plugin` 是指向其他仓库的 Git 记录，其工作区改动不会随 Lain-plugin 的提交传递。`patches/ws-plugin-qqbot.patch` 保存了本项目所需的兼容改动：OneBot 的普通发送接口按主动发送处理，避免误用最近消息的被动回复窗口，并补齐文件消息段。需要在独立安装的 `Miao-Yunzai/plugins/ws-plugin` 使用这些改动时，在 `Miao-Yunzai` 根目录运行：
