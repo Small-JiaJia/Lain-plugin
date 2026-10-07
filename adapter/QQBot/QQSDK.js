@@ -4,6 +4,7 @@ import Constans from 'qq-group-bot/lib/constans.js'
 import axios from 'axios'
 import Cfg from '../../../../lib/config/config.js'
 import common from '../../lib/common/common.js'
+import { installQQBotAPIPolicy } from './APIPolicy.js'
 
 export default class QQSDK {
   constructor (config) {
@@ -66,6 +67,7 @@ export default class QQSDK {
 
     /** 创建机器人 */
     this.sdk = new QQBot(this.config)
+    installQQBotAPIPolicy(this.sdk)
     this.patchSessionManager()
     this.patchLogger()
 

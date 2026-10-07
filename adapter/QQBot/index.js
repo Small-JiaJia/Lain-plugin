@@ -16,6 +16,7 @@ import Button from './plugins.js'
 import QQBotButton from './Button.js'
 import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
+import { installQQBotAPIPolicy, normalizeRestrictedAPIError } from './APIPolicy.js'
 
 lain.DAU = {}
 
@@ -29,6 +30,7 @@ export default class adapterQQBot {
     this.id = String(sdk.config.appid)
     /** sdk */
     this.sdk = sdk
+    installQQBotAPIPolicy(sdk)
     /** 基本配置 */
     this.config = sdk.config
     /** bot_state 仅 30 QPM；短时间内复用同一群的查询结果。 */
@@ -143,7 +145,7 @@ export default class adapterQQBot {
       getGroupMemberInfo: (group_id, user_id) => Bot.getGroupMemberInfo(group_id, user_id),
       /** QQ Bot v2 群管理：群禁言与入群自动审批策略。 */
       getGroupMuteStatus: async groupId => await this.getGroupMuteStatus(groupId),
-      getGroupBotState: async groupId => await this.getGroupBotState(groupId),
+      getGroupBotState: async (groupId, options) => await this.getGroupBotState(groupId, options),
       setGroupMemberMute: async (groupId, userId, duration) => await this.setGroupMemberMute(groupId, userId, duration),
       setGroupMemberMutes: async (groupId, members) => await this.setGroupMemberMutes(groupId, members),
       getGroupJoinRequests: async (groupId, options) => await this.getGroupJoinRequests(groupId, options),
@@ -389,7 +391,7 @@ export default class adapterQQBot {
       muteMember: async (userId, time) => await this.setGroupMemberMute(groupID, userId, time),
       /** 查询群禁言状态（含当前被禁言成员）。 */
       getMuteStatus: async () => await this.getGroupMuteStatus(groupID),
-      getBotState: async () => await this.getGroupBotState(groupID),
+      getBotState: async options => await this.getGroupBotState(groupID, options),
       /** 拉取待处理的入群申请列表。 */
       getJoinRequests: async options => await this.getGroupJoinRequests(groupID, options),
       /** 审批入群申请；approve=false 时可通过 options.reject_reason 填写拒绝理由。 */
@@ -475,15 +477,23 @@ export default class adapterQQBot {
   }
 
   /** 官方 /bot_state：主动推送、接收范围及机器人在群内的身份。 */
-  async getGroupBotState (groupId, { fresh = false } = {}) {
+  async getGroupBotState (groupId, { fresh = false, required = true } = {}) {
     const groupOpenid = await this.resolveOpenid(groupId, 'group')
     const key = String(groupOpenid)
     const cached = this.groupBotStateCache.get(key)
     if (!fresh && cached && cached.expires > Date.now()) {
-      if (cached.error) throw cached.error
+      if (cached.error) {
+        if (required) throw cached.error
+        return null
+      }
       return cached.value
     }
-    if (cached?.pending) return await cached.pending
+    if (cached?.pending) {
+      try { return await cached.pending } catch (error) {
+        if (required) throw error
+        return null
+      }
+    }
     const pending = this.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/bot_state`)
       .then(({ data }) => {
         if (!data || typeof data.allow_proactive_msg !== 'boolean' || !data.recv_msg_setting || !data.member_role) {
@@ -493,12 +503,17 @@ export default class adapterQQBot {
         return data
       })
       .catch(error => {
-        const wrapped = new Error(`无法查询 QQ 群机器人状态（/bot_state）：${error.message || error}；请检查接口白名单及机器人权限`)
+        const wrapped = normalizeRestrictedAPIError(this.sdk, error, {
+          method: 'GET', path: `/v2/groups/${encodeURIComponent(groupOpenid)}/bot_state`
+        })
         this.groupBotStateCache.set(key, { error: wrapped, expires: Date.now() + 10000 })
         throw wrapped
       })
     this.groupBotStateCache.set(key, { pending })
-    return await pending
+    try { return await pending } catch (error) {
+      if (required) throw error
+      return null
+    }
   }
 
   /**
@@ -1187,10 +1202,14 @@ export default class adapterQQBot {
     this.normalizeIncomingMessage(e, tinyId)
     if (isGroup && rawGroupId) {
       try {
-        const state = await this.getGroupBotState(rawGroupId)
-        e.qqbot_group_state = state
-        e.qqbot_recv_msg_setting = state.recv_msg_setting
-        e.qqbot_allow_proactive_msg = state.allow_proactive_msg
+        const state = await this.getGroupBotState(rawGroupId, { required: false })
+        if (state) {
+          e.qqbot_group_state = state
+          e.qqbot_recv_msg_setting = state.recv_msg_setting
+          e.qqbot_allow_proactive_msg = state.allow_proactive_msg
+        } else {
+          e.qqbot_recv_msg_setting = e.qqbot_is_group_all ? 'all' : 'only_mention'
+        }
       } catch (error) {
         e.qqbot_group_state_error = error.message
         // 全量事件自身仍能确定按钮不应自动 @，不依赖受限的查询接口。

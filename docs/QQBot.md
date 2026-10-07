@@ -94,6 +94,50 @@ await e.markdown('请选择操作：', {
 
 图片、语音和视频需要可供 QQ 平台访问的公网 URL。可通过 `Bot.imageToUrl`、`Bot.audioToUrl`、`Bot.videoToUrl` 提供自定义转换，也可按 Lain-plugin 配置启用公网临时文件服务。具体代码示例见仓库内的 `plugins/纯文模板.js` 和 `plugins/纯文模板-优化混排.js`。
 
+## 白名单接口的异常处理
+
+按当前官方文档的“仅白名单机器人可用”和“内邀接入”标记，适配器统一处理以下 7 个 API：
+
+| 方法 | 接口 | 功能 |
+| --- | --- | --- |
+| GET | `/v2/groups/{group_openid}/info` | 群基本信息 |
+| GET | `/v2/groups/{group_openid}/bot_state` | 机器人群内状态 |
+| GET | `/v2/groups/{group_openid}/members` | 成员列表 |
+| GET | `/v2/groups/{group_openid}/members/{member_openid}` | 成员详情 |
+| POST | `/v2/groups/{group_openid}/batch_remove_members` | 批量移除成员 |
+| GET | `/v2/groups/{group_openid}/member_blacklist` | 查询黑名单 |
+| POST | `/v2/groups/{group_openid}/member_blacklist` | 操作黑名单 |
+
+统一策略处理 HTTP 请求失败及 HTTP 200 中的非零业务错误码，不会把异常响应当作成功数据。同一机器人、方法、接口与错误每分钟记录一份样例，日志前缀为 `[QQBot 白名单接口异常留样]`，包含 AppID、接口模板、错误码、可取得的 HTTP 状态、错误文字与追踪 ID；不记录凭据、请求体或成员资料。
+
+接收消息时查询群状态属于可选接口，失败返回未知状态，消息仍正常分发。失败状态短暂缓存 10 秒，避免每条消息重复请求。功能必须依赖该接口时，例如查询管理员身份、禁言前确认权限、主动消息或文件发送前确认推送权限，调用仍会失败，并返回可由插件回复的错误信息。官方 `11253` 或明确的白名单拒绝文字会转换为“账户不在接口白名单内，无法使用该功能（方法 接口）”；网络故障、限流、字段不完整及普通权限不足保留各自原因，不误报白名单。
+
+```js
+// 可选状态查询：失败返回 null，只记录日志。
+const state = await bot.getGroupBotState(groupOpenid, { required: false })
+if (state) console.log(state.recv_msg_setting)
+
+// 功能必需的查询：插件应把返回的错误文字通过当前消息上下文回复。
+try {
+  const isAdmin = await e.group.is_admin()
+  await e.reply(isAdmin ? '机器人是群管理员' : '机器人不是群管理员')
+} catch (error) {
+  await e.reply(error.message)
+}
+```
+
+自定义 SDK 调用中，可选白名单请求可以传 `qqbotOptional: true`。失败响应为 `{ data: null, qqbot_api_error: Error }`，必须先检查错误或空数据；未标记可选的调用默认属于功能必需调用，失败拒绝 Promise。该选项只作用于上表 API，普通消息、上传、撤回及其他接口保留原有错误处理。
+
+```js
+const response = await bot.sdk.request.get(
+  `/v2/groups/${groupOpenid}/info`,
+  { qqbotOptional: true }
+)
+if (response.data) console.log(response.data.group_name)
+```
+
+接口范围和错误码依据官方[群基本信息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_info.get.html)、[群内状态](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html)、[成员列表](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members.get.html)、[成员详情](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)、[批量移除](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_batch_remove_members.post.html)、[黑名单查询](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_member_blacklist.get.html)与[黑名单操作](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_member_blacklist.post.html)。入群自动审批策略中的 QQ 号码白名单是群管理数据，与这里的接口访问白名单不同。
+
 ## 群成员进退群通知
 
 群聊模式自动订阅 `GROUP_MEMBER_EVENT (1 << 24)` 和 `GROUP_AND_C2C_EVENT (1 << 25)`，WebSocket 与 WebHook 都使用同一解析路径。
@@ -117,7 +161,7 @@ await e.markdown('请选择操作：', {
 
 QQBot 将 `GROUP_AT_MESSAGE_CREATE`（群 @ 机器人）和 `GROUP_MESSAGE_CREATE`（群全量消息）作为不同 Gateway 事件处理。适配器把原始事件名保存在 `e.qqbot_event_type`，并提供 `e.qqbot_is_group_at`、`e.qqbot_is_group_all` 两个布尔值。`e.atme` 表示这条消息调用了机器人。
 
-收到群消息时，适配器调用官方 `GET /v2/groups/{group_openid}/bot_state`，并在事件上设置 `e.qqbot_group_state`、`e.qqbot_recv_msg_setting`（`all`、`only_mention` 或 `mention_and_context`）和 `e.qqbot_allow_proactive_msg`。状态短暂缓存 15 秒，避免超过官方 30 QPM 限制。接口未开放时，`e.qqbot_group_state_error` 记录原因；全量事件仍保留自身事件类型。该接口仅对获白名单权限的机器人开放。
+收到群消息时，适配器调用官方 `GET /v2/groups/{group_openid}/bot_state`，并在事件上设置 `e.qqbot_group_state`、`e.qqbot_recv_msg_setting`（`all`、`only_mention` 或 `mention_and_context`）和 `e.qqbot_allow_proactive_msg`。状态短暂缓存 15 秒，避免超过官方 30 QPM 限制。该查询在接收消息时是可选操作：接口未开放、网络错误或返回字段不完整时只在日志中留样，继续分发消息；接收类型按 Gateway 事件回退判断，不伪造主动推送权限或管理员身份。该接口仅对获白名单权限的机器人开放。
 
 按钮由定义字段决定动作：`data` / `input` 是普通可输入按钮，默认不立即发送；`callback` 是回调按钮，点击后用户不发送聊天消息。私聊和群聊均保留作者指定的动作，不因 `recv_msg_setting` 自动转换。原生官方按钮保留 `action.type`，mqqapi 内联命令保留输入动作。回调事件在兼容层中标记 `atme=true`，但消息数组不会传入一个指向机器人自己的 `at` 段。回调回复使用 Gateway 最外层事件 ID，属于被动回复；互动事件体的 `d.id` 只用于 PUT 确认。主动调用 `Bot[appid].pickGroup(groupOpenID).sendMsg(...)` 时先检查 `allow_proactive_msg`，未开启或无法查询时抛出明确错误；被动回复仍使用消息或事件 ID。
 
