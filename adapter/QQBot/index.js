@@ -1788,7 +1788,23 @@ export default class adapterQQBot {
     try {
       /** 自定义图床 */
       if (Bot?.imageToUrl) {
-        const { width, height, url } = await Bot.imageToUrl(file)
+        const res = await Bot.imageToUrl(file)
+        // 打印一次，方便排查
+        logger.info('[Lain-plugin] imageToUrl 返回:', JSON.stringify(res))
+
+        // 兼容各种返回结构：字符串 / {url} / {link} / {data:{url}} / {data:{link}}
+        const url = typeof res === 'string'
+          ? res
+          : res?.url || res?.link || res?.data?.url || res?.data?.link
+
+        if (!url) {
+          logger.error('[Lain-plugin] imageToUrl 未返回有效 URL:', JSON.stringify(res))
+          throw new Error('imageToUrl 返回空 URL')
+        }
+
+        const width = res?.width || 0
+        const height = res?.height || 0
+
         common.mark('Lain-plugin', `使用自定义图床发送图片：${url}`)
         return { type, file: url, width, height }
       } else if (Bot?.uploadFile) {
