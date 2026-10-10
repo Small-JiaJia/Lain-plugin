@@ -1,6 +1,7 @@
 import { exec } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
+import sizeOf from 'image-size'
 import lodash from 'lodash'
 import fetch from 'node-fetch'
 import path from 'path'
